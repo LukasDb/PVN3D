@@ -13,7 +13,7 @@ Callbacks: # TO be revised
   #- ReduceLROnPlateau
   #- terminate on nan
 gpus: # if multiple gpus then distributed training is used
-  - 5
+  - 3
 model_compile:
   run_eagerly: false
 model_fit:
@@ -24,7 +24,7 @@ model_fit:
 # Define Kwargs for modules below
 
 Adam:
-  learning_rate: 0.0002
+  learning_rate: 0.0001
   
 TrainBlender:
   batch_size: 32
@@ -107,12 +107,12 @@ PVN3D_E2E:
 
 
 DemoInference:
-  num_validate: 5
+  num_validate: 10
   data_cfg: *val_config
 
 
 PvnLoss:
   binary_loss: True
-  kp_loss_discount: 1.0
-  cp_loss_discount: 1.0
-  seg_loss_discount: 0.01
+  kp_loss_discount: 10.0 # is in the range of m -> ~0.02
+  cp_loss_discount: 10.0 # same
+  seg_loss_discount: 0.001 # starts at 6 end of epoch 1: 70

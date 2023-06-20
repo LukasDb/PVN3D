@@ -26,33 +26,29 @@ class PvnLoss(tf.keras.losses.Loss):
             from_logits=True, reduction=red
         )
 
+    @staticmethod
     def get_offst(
-            self,
-            RT,  # [b, 4,4]
-            pcld_xyz,  # [b, n_pts, 3]
-            mask_selected,  # [b, n_pts, 1] 0|1
-            kpts_cpts,  # [b, 9,3]
-        ):
+        RT,  # [b, 4,4]
+        pcld_xyz,  # [b, n_pts, 3]
+        mask_selected,  # [b, n_pts, 1] 0|1
+        kpts_cpts,  # [b, 9,3]
+    ):
         # transform kpts_cpts to camera frame using rt
-        kpts_cpts_cam = tf.matmul(kpts_cpts, RT[:, :3, :3]) + RT[:, tf.newaxis, :3, 3]
+        kpts_cpts_cam = (
+            tf.matmul(kpts_cpts, tf.transpose(RT[:, :3, :3], (0, 2, 1)))
+            + RT[:, tf.newaxis, :3, 3]
+        )
 
         # calculate offsets to the pointcloud
         kpts_cpts_cam = tf.expand_dims(kpts_cpts_cam, axis=1)  # [b, 1, 9, 3]
         pcld_xyz = tf.expand_dims(pcld_xyz, axis=2)  # [b, n_pts, 1, 3]
         offsets = tf.subtract(kpts_cpts_cam, pcld_xyz)  # [b, n_pts, 9, 3]
         # mask offsets to the object points
-        #offsets = offsets * tf.cast(mask_selected[:, :, tf.newaxis], tf.float32)
-        offsets = tf.where(mask_selected[:, :, tf.newaxis]==1, offsets, 0.0)
+        # offsets = offsets * tf.cast(mask_selected[:, :, tf.newaxis], tf.float32)
+        offsets = tf.where(mask_selected[:, :, tf.newaxis] == 1, offsets, 0.0)
         kp_offsets = offsets[:, :, :8, :]  # [b, n_pts, 8, 3]
         cp_offsets = offsets[:, :, 8:, :]  # [b, n_pts, 1, 3]
         return kp_offsets, cp_offsets
-
-    @staticmethod
-    def l1_loss_kp_cp(kp_cp_pre, kp_cp_targ):
-        diffs = tf.subtract(kp_cp_pre, kp_cp_targ)
-        abs_diff = tf.math.abs(diffs)
-        l1_loss_kp_cp = tf.reduce_mean(abs_diff)
-        return l1_loss_kp_cp
 
     @staticmethod
     def l1_loss(offset_pred, offset_gt, mask_labels):
@@ -75,7 +71,7 @@ class PvnLoss(tf.keras.losses.Loss):
         diff = tf.subtract(offset_pred, offset_gt)
         abs_diff = tf.multiply(tf.math.abs(diff), w)
         in_loss = abs_diff
-        l1_loss = tf.reduce_sum(in_loss) / (num_nonzero + 1e-3)
+        l1_loss = tf.reduce_sum(in_loss) / num_nonzero
 
         return l1_loss
 
