@@ -40,7 +40,7 @@ class PspNetParams:
 
 class _PspNet:
     def __init__(self, params: PspNetParams):
-        super(_PspNet, self).__init__()
+        super().__init__()
         self.params = params
 
     def pspnet_layers(self, resnet_feats):

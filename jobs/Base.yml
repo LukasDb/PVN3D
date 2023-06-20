@@ -13,24 +13,24 @@ Callbacks: # TO be revised
   #- ReduceLROnPlateau
   #- terminate on nan
 gpus: # if multiple gpus then distributed training is used
-  - 0
+  - 5
 model_compile:
   run_eagerly: false
 model_fit:
-  epochs: 6
-  validation_freq: 2
+  epochs: 20
+  validation_freq: 1
 
 # --- ---
 # Define Kwargs for modules below
 
 Adam:
-  learning_rate: 0.0001
+  learning_rate: 0.0002
   
 TrainBlender:
-  batch_size: 16
-  root: "/datasets/blender"
+  batch_size: 32
+  root: "/home/lukas/data/blender/blender"
   data_name: cps
-  cls_type: chew_toy
+  cls_type: cpsduck
   train_split: 0.9
   #cutoff: 1000
   use_cache: true
@@ -39,10 +39,10 @@ TrainBlender:
     - 1920
     
 ValBlender: &val_config
-  batch_size: 8
-  root: "/datasets/blender"
+  batch_size: 32
+  root: "/home/lukas/data/blender/blender"
   data_name: cps
-  cls_type: chew_toy
+  cls_type: cpsduck
   train_split: 0.9
   #cutoff: 1000
   use_cache: true
@@ -53,6 +53,7 @@ ValBlender: &val_config
 
 PVN3D_E2E:
   resnet_input_shape: [160, 160, 3] # in 6IMPOSE: 80x80
+  n_point_candidates: 10
   num_kpts: 8
   num_cpts: 1
   num_cls: 1
@@ -85,7 +86,7 @@ PVN3D_E2E:
     keep_prob: 0.5
     return_features: true
     use_tf_interpolation: true
-    n_sample_points: 512
+    n_sample_points: 4096
   dense_fusion_params:
     num_embeddings  : 128
     conv1d_kernel: 1

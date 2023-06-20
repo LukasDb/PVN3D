@@ -102,7 +102,7 @@ class PointNet2Params:
 
 class _PointNet2TfModel(tf.keras.Model):
     def __init__(self, params: PointNet2Params, num_classes):
-        super(_PointNet2TfModel, self).__init__(name = "PointNet2")
+        super().__init__(name = "PointNet2")
         self.params = params
         self.activation = tf.nn.relu
         self.keep_prob = self.params.keep_prob

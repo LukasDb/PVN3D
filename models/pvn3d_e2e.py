@@ -24,6 +24,7 @@ class PVN3D_E2E(_PVN3D):
         point_net2_params: Dict,
         dense_fusion_params: Dict,
         mlp_params: Dict,
+        n_point_candidates: int,
     ):
         super().__init__(
             resnet_input_shape=resnet_input_shape,
@@ -39,10 +40,9 @@ class PVN3D_E2E(_PVN3D):
             build=False,
         )
 
-
         self.resnet_input_shape = tf.cast(resnet_input_shape, tf.int32)
 
-        self.initial_pose_model = _InitialPoseModel()
+        self.initial_pose_model = _InitialPoseModel(n_point_candidates)
 
         b = 5
         mock_rgb = tf.random.uniform((b, 1080, 1920, 3), maxval=255, dtype=tf.int32)
@@ -60,9 +60,12 @@ class PVN3D_E2E(_PVN3D):
         )
 
         # mock_roi = tf.random.uniform((b, 4), maxval=480, dtype=tf.int32)
-        mock_roi = tf.constant([[0, 0, 480, 640]] * b, dtype=tf.int32) # y1, x1, y2, x2
+        mock_roi = tf.constant([[0, 0, 480, 640]] * b, dtype=tf.int32)  # y1, x1, y2, x2
         mock_mesh_kpts = tf.random.uniform((b, 9, 3), maxval=0.01)
-        self((mock_rgb, mock_dpt, mock_cam_intrinsic, mock_roi, mock_mesh_kpts), training=True)
+        self(
+            (mock_rgb, mock_dpt, mock_cam_intrinsic, mock_roi, mock_mesh_kpts),
+            training=True,
+        )
         self.summary()
 
     @staticmethod
@@ -140,11 +143,15 @@ class PVN3D_E2E(_PVN3D):
             x_map[tf.newaxis, :, :] < x2[:, tf.newaxis, tf.newaxis],
         )
         in_roi = tf.logical_and(in_y, in_x)
-        #depth_roi_masked = tf.where(in_roi[:, :, :], depth[..., 0], 0.0)
+        # depth_roi_masked = tf.where(in_roi[:, :, :], depth[..., 0], 0.0)
 
         # get masked indices (valid truncated depth inside of roi)
-        is_valid_depth = tf.logical_and(depth[..., 0] > 1e-6, depth[..., 0] < depth_trunc)
-        inds = tf.where(tf.logical_and(in_roi, is_valid_depth)) # [b*h*w, 3], last dimension is [batch_index, y_index, x_index]
+        is_valid_depth = tf.logical_and(
+            depth[..., 0] > 1e-6, depth[..., 0] < depth_trunc
+        )
+        inds = tf.where(
+            tf.logical_and(in_roi, is_valid_depth)
+        )  # [b*h*w, 3], last dimension is [batch_index, y_index, x_index]
         inds = tf.cast(inds, tf.int32)
 
         inds = tf.random.shuffle(inds)
@@ -152,22 +159,24 @@ class PVN3D_E2E(_PVN3D):
         inds = tf.ragged.stack_dynamic_partitions(
             inds, inds[:, 0], tf.shape(rgb)[0]
         )  # [b, None, 3]
-        
+
         # TODO if we dont have enough points, we pad the indices with 0s, how to handle that?
-        inds = inds[:, :self.point_net2_params.n_sample_points].to_tensor()  # [b, num_points, 3]
+        inds = inds[
+            :, : self.point_net2_params.n_sample_points
+        ].to_tensor()  # [b, num_points, 3]
 
         # calculate xyz
         cam_cx, cam_cy = camera_matrix[:, 0, 2], camera_matrix[:, 1, 2]
         cam_fx, cam_fy = camera_matrix[:, 0, 0], camera_matrix[:, 1, 1]
 
         # inds[..., 0] == index into batch -> not needed here
-        sampled_ymap = tf.gather_nd(y_map, inds[:, :, 1:]) # [b, num_points]
-        sampled_xmap = tf.gather_nd(x_map, inds[:, :, 1:]) # [b, num_points]
+        sampled_ymap = tf.gather_nd(y_map, inds[:, :, 1:])  # [b, num_points]
+        sampled_xmap = tf.gather_nd(x_map, inds[:, :, 1:])  # [b, num_points]
         sampled_ymap = tf.cast(sampled_ymap, tf.float32)
         sampled_xmap = tf.cast(sampled_xmap, tf.float32)
 
-        #z = tf.gather_nd(roi_depth, inds)  # [b, num_points]
-        z = tf.gather_nd(depth[..., 0], inds) # [b, num_points]
+        # z = tf.gather_nd(roi_depth, inds)  # [b, num_points]
+        z = tf.gather_nd(depth[..., 0], inds)  # [b, num_points]
         x = (sampled_xmap - cam_cx[:, tf.newaxis]) * z / cam_fx[:, tf.newaxis]
         y = (sampled_ymap - cam_cy[:, tf.newaxis]) * z / cam_fy[:, tf.newaxis]
         xyz = tf.stack((x, y, z), axis=-1)
@@ -190,8 +199,8 @@ class PVN3D_E2E(_PVN3D):
         h_factor = bbox_h / h_t
         crop_factor = tf.cast(tf.math.ceil(tf.minimum(w_factor, h_factor)), tf.int32)
 
-        w_t = w_t*crop_factor
-        h_t = h_t*crop_factor
+        w_t = w_t * crop_factor
+        h_t = h_t * crop_factor
 
         x1_new = x_c - tf.cast(w_t / 2, tf.int32)
         x2_new = x_c + tf.cast(w_t / 2, tf.int32)
@@ -224,40 +233,56 @@ class PVN3D_E2E(_PVN3D):
         b, h, w = tf.shape(full_rgb)[0], tf.shape(full_rgb)[1], tf.shape(full_rgb)[2]
 
         # crop the image to the aspect ratio for resnet and integer crop factor
-        bbox, crop_factor = self.get_crop_index(roi, h, w)  # bbox: [b, 4], crop_factor: [b]
+        bbox, crop_factor = self.get_crop_index(
+            roi, h, w
+        )  # bbox: [b, 4], crop_factor: [b]
 
         xyz, feats, sampled_inds_in_original_image = self.pcld_processor_tf(
             tf.cast(full_rgb, tf.float32) / 255.0, depth, intrinsics, bbox
         )
-        
+
         # move the points to the center of the cropped image
-        crop_top_left = tf.concat((tf.zeros((b,1), tf.int32), bbox[:, :2]), -1) # [b, 3]
-        sampled_inds_in_roi = sampled_inds_in_original_image - crop_top_left[:, tf.newaxis, :] #  [b, num_points, 3]
-        sampled_inds_in_roi = sampled_inds_in_roi / crop_factor[:, tf.newaxis, tf.newaxis] # [b, num_points, 3]
+        crop_top_left = tf.concat(
+            (tf.zeros((b, 1), tf.int32), bbox[:, :2]), -1
+        )  # [b, 3]
+        sampled_inds_in_roi = (
+            sampled_inds_in_original_image - crop_top_left[:, tf.newaxis, :]
+        )  #  [b, num_points, 3]
+        sampled_inds_in_roi = (
+            sampled_inds_in_roi / crop_factor[:, tf.newaxis, tf.newaxis]
+        )  # [b, num_points, 3]
         sampled_inds_in_roi = tf.cast(sampled_inds_in_roi, tf.int32)
-        
+
         norm_bbox = tf.cast(bbox / [h, w, h, w], tf.float32)  # normalize bounding box
         rgb = tf.image.crop_and_resize(
-            full_rgb, norm_bbox, tf.range(tf.shape(full_rgb)[0]), self.resnet_input_shape[:2]
+            full_rgb,
+            norm_bbox,
+            tf.range(tf.shape(full_rgb)[0]),
+            self.resnet_input_shape[:2],
         )
 
         pcld_emb = self.pointnet2_model((xyz, feats), training=training)
         resnet_feats = self.resnet_model(rgb, training=training)
-        rgb_features = self.psp_model(resnet_feats, training=training) # [b, h_res, w_res, c]
+        rgb_features = self.psp_model(
+            resnet_feats, training=training
+        )  # [b, h_res, w_res, c]
         rgb_emb = tf.gather_nd(rgb_features, sampled_inds_in_roi)
         feats_fused = self.dense_fusion_model([rgb_emb, pcld_emb], training=training)
         kp, seg, cp = self.mlp_model(feats_fused, training=training)
 
-        
         if not training:
             batch_R, batch_t, voted_kpts = self.initial_pose_model(
                 [xyz, kp, cp, seg, mesh_kpts]
             )
-            return batch_R, batch_t, voted_kpts, (kp, seg, cp, xyz, sampled_inds_in_original_image, mesh_kpts)
+            return (
+                batch_R,
+                batch_t,
+                voted_kpts,
+                (kp, seg, cp, xyz, sampled_inds_in_original_image, mesh_kpts),
+            )
 
         return kp, seg, cp, xyz, sampled_inds_in_original_image, mesh_kpts
 
-    @tf.function
     def train_step(self, data):
         x = data[0]
         y = data[1]
@@ -267,20 +292,26 @@ class PVN3D_E2E(_PVN3D):
         # for y_gt, y_pred, loss in zip(y, y_pred, self.losses):
         #     loss(y_gt, y_pred)
         # this is why we changed self.compiled_loss to self.loss
+        batch_size = tf.cast(tf.shape(x[0])[0], tf.float32)
         with tf.GradientTape() as tape:
             y_pred = self(x, training=True)  # Forward pass
-            loss = self.loss(y, y_pred)
+            loss = self.loss(y, y_pred) / batch_size
         trainable_vars = self.trainable_variables
         gradients = tape.gradient(loss, trainable_vars)
 
         self.optimizer.apply_gradients(zip(gradients, trainable_vars))
 
-        return {'loss': loss}
-    
-    @tf.function
+        return {
+            "loss": loss
+        }
+
     def test_step(self, data):
         x = data[0]
         y = data[1]
-        _,_,_, y_pred = self(x, training=False)
+        batch_size = tf.cast(tf.shape(x[0])[0], tf.float32)
+        _, _, _, y_pred = self(x, training=False)
         loss = self.loss(y, y_pred)
-        return {'loss': loss}
+        loss = loss / batch_size
+        return {
+            "loss": loss
+        }

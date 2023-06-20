@@ -48,7 +48,7 @@ class _Blender(_Dataset):
         use_cache,
         root,
         train_split,
-        cutoff = None,
+        cutoff=None,
     ):
         self.cls_type = cls_type
         self.cls_id = self.cls_dict[self.cls_type]
@@ -60,7 +60,7 @@ class _Blender(_Dataset):
         self.use_cache = use_cache
         self.is_train = is_train
 
-        data_root = pathlib.Path(root) / data_name
+        self.data_root = data_root = pathlib.Path(root) / data_name
 
         self.kpts_root = data_root / "kpts"
         if self.cls_type != "all":
@@ -81,9 +81,7 @@ class _Blender(_Dataset):
 
         total_n_imgs = len(self.roots_and_ids)
 
-        split_ind = np.floor(len(self.roots_and_ids) * train_split).astype(
-            int
-        )
+        split_ind = np.floor(len(self.roots_and_ids) * train_split).astype(int)
         if is_train:
             self.roots_and_ids = self.roots_and_ids[:split_ind]
         else:
@@ -114,38 +112,36 @@ class _Blender(_Dataset):
         print(f"\t# of all images: {total_n_imgs}")
         print()
 
-
-
-
     def to_tf_dataset(self):
         def generator():
             for i in range(len(self.roots_and_ids)):
                 yield self[i]
 
-
-
         tfdata = tf.data.Dataset.from_generator(
             generator,
             output_signature=(
-                    (
-                    tf.TensorSpec(
-                        shape=(*self.im_size, 3), dtype=tf.uint8, name="rgb"
-                    ),
+                (
+                    tf.TensorSpec(shape=(*self.im_size, 3), dtype=tf.uint8, name="rgb"),
                     tf.TensorSpec(
                         shape=(*self.im_size, 1), dtype=tf.float32, name="depth"
                     ),
-                    tf.TensorSpec(shape=(3,3), dtype=tf.float32, name="intrinsics"),
+                    tf.TensorSpec(shape=(3, 3), dtype=tf.float32, name="intrinsics"),
                     tf.TensorSpec(shape=(4,), dtype=tf.int32, name="roi"),
-                    tf.TensorSpec(shape=(9,3), dtype=tf.float32, name="mesh_kpts"),
+                    tf.TensorSpec(shape=(9, 3), dtype=tf.float32, name="mesh_kpts"),
                 ),
-                (tf.TensorSpec(shape=(4,4), dtype=tf.float32, name="RT"),
-                tf.TensorSpec(shape=(*self.im_size, 1), dtype=tf.uint8, name="mask")
-                )
-            )
+                (
+                    tf.TensorSpec(shape=(4, 4), dtype=tf.float32, name="RT"),
+                    tf.TensorSpec(
+                        shape=(*self.im_size, 1), dtype=tf.uint8, name="mask"
+                    ),
+                ),
+            ),
         )
         if self.use_cache:
-            h = hash(str(self.cls_root)+str(self.cls_id)+self.cls_type+str(self.if_augment)+str(self.is_train))
-            tfdata = tfdata.cache(f'cached_data_{h}')
+            # h = hash(str(self.cls_root)+str(self.cls_id)+self.cls_type+str(self.if_augment)+str(self.is_train))
+            h = "train" if self.is_train else "val"
+            h += "_" + self.cls_type
+            tfdata = tfdata.cache(str(self.data_root / f"cached_data_{h}"))
 
         tfdata = tfdata.batch(self.batch_size, drop_remainder=True).prefetch(
             tf.data.AUTOTUNE
@@ -178,11 +174,18 @@ class _Blender(_Dataset):
         RT = example[1][0]
         mask = example[1][1]
 
-        y1, x1, y2, x2,= bboxes[:4]
+        (
+            y1,
+            x1,
+            y2,
+            x2,
+        ) = bboxes[:4]
         cv2.rectangle(rgb, (x1, y1), (x2, y2), (0, 255, 0), 2)
         rvec = cv2.Rodrigues(RT[:3, :3])[0]
         tvec = RT[:3, 3]
-        cv2.drawFrameAxes(rgb, intrinsics, np.zeros((4,)), rvec=rvec, tvec=tvec, length=0.1)
+        cv2.drawFrameAxes(
+            rgb, intrinsics, np.zeros((4,)), rvec=rvec, tvec=tvec, length=0.1
+        )
 
         c1, c2 = st.columns(2)
         c1.image(rgb, caption=f"RGB_L {rgb.shape} ({rgb.dtype})")
@@ -190,11 +193,10 @@ class _Blender(_Dataset):
             color_depth(depth),
             caption=f"Depth {depth.shape} ({depth.dtype})",
         )
-        c1.image(mask*255, caption=f"Mask {mask.shape} ({mask.dtype})")
+        c1.image(mask * 255, caption=f"Mask {mask.shape} ({mask.dtype})")
         c2.write(intrinsics)
         c2.write(kpts)
         c2.write(RT)
-
 
     def __next__(self):
         data = self[self._current]
@@ -209,20 +211,23 @@ class _Blender(_Dataset):
 
         rgb = self.get_rgb(i)
         mask = self.get_mask(i)
-        depth = self.get_depth(i)
-        bboxes = self.get_gt_bbox(i, mask=mask)[0] # FOR SINGLE OBJECT
-        rt =self.get_RT_list(i)[0] # FOR SINGLE OBJECT
+        depth = np.array(self.get_depth(i))
+        bboxes = np.array(self.get_gt_bbox(i, mask=mask)[0])  # FOR SINGLE OBJECT
+        rt = np.array(self.get_RT_list(i)[0])  # FOR SINGLE OBJECT
 
-        mask = np.where(mask==self.cls_id, 1, 0).astype(np.uint8)   
+        mask = np.where(mask == self.cls_id, 1, 0).astype(np.uint8)
 
         # TODO augment depth
 
         if self.if_augment:
             res = self.rgbmask_augment(image=rgb, mask=mask)
-            rgb = res["image"]
-            mask = res["mask"]
+            rgb = np.array(res["image"])
+            mask = np.array(res["mask"])
 
-        out = (rgb, depth, self.intrinsic_matrix, bboxes[:4], self.mesh_kpts), (rt,mask) # get rid of cls_id in bboxes
+        out = (rgb, depth, self.intrinsic_matrix, bboxes[:4], self.mesh_kpts), (
+            rt,
+            mask,
+        )  # get rid of cls_id in bboxes
         return out
 
     def get_rgb(self, index):
@@ -279,7 +284,7 @@ class _Blender(_Dataset):
                 Rt = np.eye(4)
                 Rt[:3, :3] = cam_rot.as_matrix().T @ rot.as_matrix()
                 Rt[:3, 3] = cam_rot.as_matrix().T @ (pos - cam_pos)
-                #RT_list.append((Rt, cls_id))
+                # RT_list.append((Rt, cls_id))
 
         else:
             for obj in objs:  # here we only consider the single obj
@@ -291,7 +296,7 @@ class _Blender(_Dataset):
                     Rt = np.eye(4)
                     Rt[:3, :3] = cam_rot.as_matrix().T @ rot.as_matrix()
                     Rt[:3, 3] = cam_rot.as_matrix().T @ (pos - cam_pos)
-                    #RT_list.append((Rt, self.cls_id))
+                    # RT_list.append((Rt, self.cls_id))
                     RT_list.append(Rt)
         return RT_list
 

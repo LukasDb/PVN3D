@@ -15,7 +15,7 @@ class ResNetParams:
 
 class _ResNet:
     def __init__(self, params: ResNetParams, input_shape):
-        super(_ResNet, self).__init__()
+        super().__init__()
         self.params = params
         self.input_shape = input_shape
         self.crop_factor = 1
