@@ -221,6 +221,25 @@ class PVN3D_E2E(_PVN3D):
 
         return tf.stack([y1_new, x1_new, y2_new, x2_new], axis=-1), crop_factor
 
+    @staticmethod
+    def transform_indices_from_full_image_cropped(
+        sampled_inds_in_original_image, bbox, crop_factor
+    ):
+        b = tf.shape(sampled_inds_in_original_image)[0]
+
+        crop_top_left = tf.concat(
+            (tf.zeros((b, 1), tf.int32), bbox[:, :2]), -1
+        )  # [b, 3]
+        
+        sampled_inds_in_roi = (
+            sampled_inds_in_original_image - crop_top_left[:, tf.newaxis, :]
+        )  #  [b, num_points, 3]
+        sampled_inds_in_roi = (
+            sampled_inds_in_roi / crop_factor[:, tf.newaxis, tf.newaxis]
+        )  # [b, num_points, 3]
+        sampled_inds_in_roi = tf.cast(sampled_inds_in_roi, tf.int32)
+        return sampled_inds_in_roi
+
     @tf.function
     def call(self, inputs, training=None):
         (
@@ -230,7 +249,7 @@ class PVN3D_E2E(_PVN3D):
             roi,
             mesh_kpts,
         ) = inputs  # rgb [b,h,w,3], depth: [b,h,w,1], intrinsics: [b, 3,3], roi: [b,4]
-        b, h, w = tf.shape(full_rgb)[0], tf.shape(full_rgb)[1], tf.shape(full_rgb)[2]
+        h, w = tf.shape(full_rgb)[1], tf.shape(full_rgb)[2]
 
         # crop the image to the aspect ratio for resnet and integer crop factor
         bbox, crop_factor = self.get_crop_index(
@@ -241,17 +260,9 @@ class PVN3D_E2E(_PVN3D):
             tf.cast(full_rgb, tf.float32) / 255.0, depth, intrinsics, bbox
         )
 
-        # move the points to the center of the cropped image
-        crop_top_left = tf.concat(
-            (tf.zeros((b, 1), tf.int32), bbox[:, :2]), -1
-        )  # [b, 3]
-        sampled_inds_in_roi = (
-            sampled_inds_in_original_image - crop_top_left[:, tf.newaxis, :]
-        )  #  [b, num_points, 3]
-        sampled_inds_in_roi = (
-            sampled_inds_in_roi / crop_factor[:, tf.newaxis, tf.newaxis]
-        )  # [b, num_points, 3]
-        sampled_inds_in_roi = tf.cast(sampled_inds_in_roi, tf.int32)
+        sampled_inds_in_roi = self.transform_indices_from_full_image_cropped(
+            sampled_inds_in_original_image, bbox, crop_factor
+        )
 
         norm_bbox = tf.cast(bbox / [h, w, h, w], tf.float32)  # normalize bounding box
         rgb = tf.image.crop_and_resize(
