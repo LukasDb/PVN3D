@@ -116,7 +116,10 @@ class PVN3D_E2E(_PVN3D):
         )  # pad and flip (towards cam)
         return v_norm
 
-    def pcld_processor_tf(self, rgb, depth, camera_matrix, roi, depth_trunc=2.0):
+    @staticmethod
+    def pcld_processor_tf(
+        rgb, depth, camera_matrix, roi, num_sample_points, depth_trunc=2.0
+    ):
         # depth: [b, h, w, 1]
         # rgb: [b, h, w, 3]
         # camera_matrix: [b, 3, 3]
@@ -161,9 +164,7 @@ class PVN3D_E2E(_PVN3D):
         )  # [b, None, 3]
 
         # TODO if we dont have enough points, we pad the indices with 0s, how to handle that?
-        inds = inds[
-            :, : self.point_net2_params.n_sample_points
-        ].to_tensor()  # [b, num_points, 3]
+        inds = inds[:, :num_sample_points].to_tensor()  # [b, num_points, 3]
 
         # calculate xyz
         cam_cx, cam_cy = camera_matrix[:, 0, 2], camera_matrix[:, 1, 2]
@@ -230,7 +231,7 @@ class PVN3D_E2E(_PVN3D):
         crop_top_left = tf.concat(
             (tf.zeros((b, 1), tf.int32), bbox[:, :2]), -1
         )  # [b, 3]
-        
+
         sampled_inds_in_roi = (
             sampled_inds_in_original_image - crop_top_left[:, tf.newaxis, :]
         )  #  [b, num_points, 3]
@@ -257,7 +258,11 @@ class PVN3D_E2E(_PVN3D):
         )  # bbox: [b, 4], crop_factor: [b]
 
         xyz, feats, sampled_inds_in_original_image = self.pcld_processor_tf(
-            tf.cast(full_rgb, tf.float32) / 255.0, depth, intrinsics, bbox
+            tf.cast(full_rgb, tf.float32) / 255.0,
+            depth,
+            intrinsics,
+            bbox,
+            self.point_net2_params.n_sample_points,
         )
 
         sampled_inds_in_roi = self.transform_indices_from_full_image_cropped(
