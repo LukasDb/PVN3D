@@ -1,6 +1,7 @@
 from PVN3D.losses.pvn_loss import PvnLoss
 import tensorflow as tf
 import numpy as np
+from numpy.testing import assert_array_equal, assert_array_almost_equal
 
 
 def _get_cube_keypoints(h, w, t):
@@ -58,11 +59,11 @@ def test_get_offst_centerpoint():
             [0.5, 0.5, 0.0],
             [0, 0.5, 0.0],
             [-0.5, 0.5, 0.0],
-            [0.5, 0., 0.0],
-            [0, 0., 0.0],
-            [-0.5, 0., 0.0],
+            [0.5, 0.0, 0.0],
+            [0, 0.0, 0.0],
+            [-0.5, 0.0, 0.0],
             [0.5, -0.5, 0.0],
-            [0., -0.5, 0.0],
+            [0.0, -0.5, 0.0],
             [-0.5, -0.5, 0.0],
         ]
     )  # [9, 3]
@@ -77,8 +78,8 @@ def test_get_offst_centerpoint():
     cp_off = cp_off.numpy()
     print("Got cp_off:\n", cp_off)
     print("Expected:\n", offsets_cp_gt)
-    assert cp_off.shape == (1, 9, 1, 3)
-    assert np.all((cp_off - offsets_cp_gt) < 1e-6)
+    assert_array_equal(cp_off.shape, (1, 9, 1, 3))
+    assert_array_almost_equal(cp_off, offsets_cp_gt)
 
 
 def test_l1loss_zero_loss():
@@ -90,7 +91,8 @@ def test_l1loss_zero_loss():
     offset_pred = tf.constant(offset_pred, dtype=tf.float32)
     offset_gt = tf.constant(offset_pred, dtype=tf.float32)
     mask_labels = tf.ones((bs, n_pts), dtype=tf.int32)
-    assert PvnLoss.l1_loss(offset_pred, offset_gt, mask_labels) == tf.constant(0.0)
+    loss = PvnLoss.l1_loss(offset_pred, offset_gt, mask_labels)
+    assert_array_almost_equal(loss, 0.0)
 
 
 def test_l1loss_masked_zero_loss():
@@ -113,11 +115,11 @@ def test_l1loss_masked_zero_loss():
     offset_pred = tf.constant(offset_pred, dtype=tf.float32)
     offset_gt = tf.constant(offset_gt, dtype=tf.float32)
     mask_labels = tf.constant(mask_labels, dtype=tf.int32)
-    assert PvnLoss.l1_loss(offset_pred, offset_gt, mask_labels) == tf.constant(0.0)
+    loss = PvnLoss.l1_loss(offset_pred, offset_gt, mask_labels)
+    assert_array_almost_equal(loss, 0.0)
 
 
 def test_l1loss_set_loss():
-    """test loss==0 when offset_pred==offset_gt"""
     bs = 3
     n_pts = 10
     n_kpts = 8
@@ -134,8 +136,5 @@ def test_l1loss_set_loss():
     expected_l1_distance = (
         error * n_kpts * 3
     )  # summed manhattan distance over keypoints
-    assert (
-        PvnLoss.l1_loss(offset_pred, offset_gt, mask_labels)
-        - tf.constant(expected_l1_distance, dtype=tf.float32)
-        < 1e-6
-    )
+    loss = PvnLoss.l1_loss(offset_pred, offset_gt, mask_labels)
+    assert_array_almost_equal(loss, expected_l1_distance)
