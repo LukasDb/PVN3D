@@ -187,37 +187,37 @@ class PVN3D_E2E(_PVN3D):
 
         return xyz, feats, inds
 
-    def get_crop_index(self, roi, in_h, in_w):
+    @staticmethod
+    def get_crop_index(roi, in_h, in_w, resnet_h, resnet_w):
         y1, x1, y2, x2 = roi[:, 0], roi[:, 1], roi[:, 2], roi[:, 3]
 
         x_c = tf.cast((x1 + x2) / 2, tf.int32)
         y_c = tf.cast((y1 + y2) / 2, tf.int32)
-        h_t, w_t = self.resnet_input_shape[0], self.resnet_input_shape[1]
 
         bbox_w, bbox_h = (x2 - x1), (y2 - y1)
-        w_factor = bbox_w / w_t  # factor to scale down to resnet shape
-        h_factor = bbox_h / h_t
-        crop_factor = tf.cast(tf.math.ceil(tf.minimum(w_factor, h_factor)), tf.int32)
+        w_factor = bbox_w / resnet_w  # factor to scale down to resnet shape
+        h_factor = bbox_h / resnet_h
+        crop_factor = tf.cast(tf.math.ceil(tf.maximum(w_factor, h_factor)), tf.int32)
 
-        w_t = w_t * crop_factor
-        h_t = h_t * crop_factor
+        resnet_w = resnet_w * crop_factor
+        resnet_h = resnet_h * crop_factor
 
-        x1_new = x_c - tf.cast(w_t / 2, tf.int32)
-        x2_new = x_c + tf.cast(w_t / 2, tf.int32)
-        y1_new = y_c - tf.cast(h_t / 2, tf.int32)
-        y2_new = y_c + tf.cast(h_t / 2, tf.int32)
+        x1_new = x_c - tf.cast(resnet_w / 2, tf.int32)
+        x2_new = x_c + tf.cast(resnet_w / 2, tf.int32)
+        y1_new = y_c - tf.cast(resnet_h / 2, tf.int32)
+        y2_new = y_c + tf.cast(resnet_h / 2, tf.int32)
 
+        x2_new = tf.where(x1_new < 0, resnet_w, x2_new)
         x1_new = tf.where(x1_new < 0, 0, x1_new)
-        x2_new = tf.where(x1_new < 0, x2_new, x1_new + w_t)
 
+        x1_new = tf.where(x2_new > in_w, in_w - resnet_w, x1_new)
         x2_new = tf.where(x2_new > in_w, in_w, x2_new)
-        x1_new = tf.where(x2_new > in_w, x2_new - w_t, x1_new)
 
+        y2_new = tf.where(y1_new < 0, resnet_h, y2_new)
         y1_new = tf.where(y1_new < 0, 0, y1_new)
-        y2_new = tf.where(y1_new < 0, y2_new, y1_new + h_t)
 
+        y1_new = tf.where(y2_new > in_h, in_h - resnet_h, y1_new)
         y2_new = tf.where(y2_new > in_h, in_h, y2_new)
-        y1_new = tf.where(y2_new > in_h, y2_new - h_t, y1_new)
 
         return tf.stack([y1_new, x1_new, y2_new, x2_new], axis=-1), crop_factor
 
@@ -234,7 +234,7 @@ class PVN3D_E2E(_PVN3D):
 
         # crop the image to the aspect ratio for resnet and integer crop factor
         bbox, crop_factor = self.get_crop_index(
-            roi, h, w
+            roi, h, w, self.resnet_input_shape[0], self.resnet_input_shape[1]
         )  # bbox: [b, 4], crop_factor: [b]
 
         xyz, feats, sampled_inds_in_original_image = self.pcld_processor_tf(
@@ -301,9 +301,7 @@ class PVN3D_E2E(_PVN3D):
 
         self.optimizer.apply_gradients(zip(gradients, trainable_vars))
 
-        return {
-            "loss": loss
-        }
+        return {"loss": loss}
 
     def test_step(self, data):
         x = data[0]
@@ -312,6 +310,4 @@ class PVN3D_E2E(_PVN3D):
         _, _, _, y_pred = self(x, training=False)
         loss = self.loss(y, y_pred)
         loss = loss / batch_size
-        return {
-            "loss": loss
-        }
+        return {"loss": loss}

@@ -11,7 +11,7 @@ class PvnLoss(tf.keras.losses.Loss):
         kp_loss_discount,
         cp_loss_discount,
         seg_loss_discount,
-        **kwargs
+        **kwargs,
     ):
         super().__init__(**kwargs)
         self.binary_loss = binary_loss
@@ -75,7 +75,7 @@ class PvnLoss(tf.keras.losses.Loss):
 
         return l1_loss
 
-    @tf.function
+    #@tf.function
     def call(self, y_true, y_pred):
         rt, mask = y_true[0], y_true[1]
 
@@ -99,6 +99,7 @@ class PvnLoss(tf.keras.losses.Loss):
             loss_seg = self.BinaryFocalLoss(
                 mask_selected, seg_pred
             )  # return batch-wise value
+            loss_seg = tf.reduce_mean(loss_seg)
         else:
             raise NotImplementedError
             loss_seg = self.CategoricalCrossentropy(

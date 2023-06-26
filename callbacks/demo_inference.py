@@ -113,7 +113,7 @@ class DemoInference(cb.Callback):
                     gt_color = np.array((0, 255, 0), dtype=np.uint8)
                     pred_color = np.array((255, 0, 0), dtype=np.uint8)
 
-                    scale_marker = lambda z: 10 + int(z * 15)
+                    scale_marker = lambda z: 10 + int(z * 20)
 
                     cv2.drawMarker(
                         rgb2,
@@ -127,7 +127,7 @@ class DemoInference(cb.Callback):
                         rgb2,
                         (int(x_pred), int(y_pred)),
                         pred_color.tolist(),
-                        cv2.MARKER_CROSS,
+                        cv2.MARKER_TILTED_CROSS,
                         scale_marker(z_pred),
                         1,
                     )
