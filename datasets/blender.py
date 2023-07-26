@@ -13,6 +13,7 @@ import tensorflow as tf
 from cvde.tf import Dataset as _Dataset
 import streamlit as st
 from functools import cached_property
+import itertools as it
 
 
 class _Blender(_Dataset):
@@ -94,9 +95,7 @@ class _Blender(_Dataset):
 
         self.rgbmask_augment = A.Compose(
             [
-                A.ColorJitter(
-                    brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1, p=0.5
-                ),
+                A.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1, p=0.5),
                 A.RandomGamma(p=0.2),
                 A.AdvancedBlur(p=0.2),
                 A.GaussNoise(p=0.2),
@@ -110,6 +109,7 @@ class _Blender(_Dataset):
         print(f"\tTotal split # of images: {len(self.roots_and_ids)}")
         print(f"\tCls root: {self.cls_root}")
         print(f"\t# of all images: {total_n_imgs}")
+        # print(f"\nIntrinsic matrix: {self.intrinsic_matrix}")
         print()
 
     def to_tf_dataset(self):
@@ -122,18 +122,14 @@ class _Blender(_Dataset):
             output_signature=(
                 (
                     tf.TensorSpec(shape=(*self.im_size, 3), dtype=tf.uint8, name="rgb"),
-                    tf.TensorSpec(
-                        shape=(*self.im_size, 1), dtype=tf.float32, name="depth"
-                    ),
+                    tf.TensorSpec(shape=(*self.im_size, 1), dtype=tf.float32, name="depth"),
                     tf.TensorSpec(shape=(3, 3), dtype=tf.float32, name="intrinsics"),
                     tf.TensorSpec(shape=(4,), dtype=tf.int32, name="roi"),
                     tf.TensorSpec(shape=(9, 3), dtype=tf.float32, name="mesh_kpts"),
                 ),
                 (
                     tf.TensorSpec(shape=(4, 4), dtype=tf.float32, name="RT"),
-                    tf.TensorSpec(
-                        shape=(*self.im_size, 1), dtype=tf.uint8, name="mask"
-                    ),
+                    tf.TensorSpec(shape=(*self.im_size, 1), dtype=tf.uint8, name="mask"),
                 ),
             ),
         )
@@ -143,10 +139,24 @@ class _Blender(_Dataset):
             h += "_" + self.cls_type
             tfdata = tfdata.cache(str(self.data_root / f"cached_data_{h}"))
 
-        tfdata = tfdata.batch(self.batch_size, drop_remainder=True).prefetch(
-            tf.data.AUTOTUNE
+        tfdata = (
+            tfdata.batch(self.batch_size, drop_remainder=True)
+            .map(self.simple_add_depth_background, num_parallel_calls=tf.data.AUTOTUNE)
+            .prefetch(tf.data.AUTOTUNE)
         )
         return tfdata
+
+    @staticmethod
+    @tf.function
+    def simple_add_depth_background(x, y):
+        rgb, depth, intrinsics, roi, mesh_kpts = x
+        RT, mask = y
+        depth = tf.where(
+            mask == 1,
+            depth,
+            tf.random.uniform(shape=depth.shape, minval=0.3, maxval=1.5),
+        )
+        return (rgb, depth, intrinsics, roi, mesh_kpts), (RT, mask)
 
     def get_roots_and_ids_for_cls_root(self, cls_root: pathlib.Path):
         numeric_file_ids = (cls_root / "rgb").glob("*")
@@ -167,12 +177,120 @@ class _Blender(_Dataset):
 
         rgb = example[0][0]
         depth = example[0][1]
-        intrinsics = example[0][2]
+        intrinsics = example[0][2].astype(np.float32)
         bboxes = example[0][3]
         kpts = example[0][4]
 
         RT = example[1][0]
         mask = example[1][1]
+
+        #   @staticmethod
+        #     def get_offst(
+        #         RT,  # [b, 4,4]
+        #         pcld_xyz,  # [b, n_pts, 3]
+        #         mask_selected,  # [b, n_pts, 1] 0|1
+        #         kpts_cpts,  # [b, 9,3]
+        #     ):
+        #         return kp_offsets, cp_offsets
+
+        from losses.pvn_loss import PvnLoss
+        from models.pvn3d_e2e import PVN3D_E2E
+
+        h, w = rgb.shape[:2]
+        _bbox, _crop_factor = PVN3D_E2E.get_crop_index(
+            bboxes[None], h, w, 160, 160
+        )  # bbox: [b, 4], crop_factor: [b]
+
+        # xyz: [b, num_points, 3]
+        # inds:  # [b, num_points, 3] with last 3 is index into original image
+        xyz, feats, inds = PVN3D_E2E.pcld_processor_tf(
+            (rgb[None] / 255.0).astype(np.float32),
+            depth[None].astype(np.float32),
+            intrinsics[None].astype(np.float32),
+            _bbox,
+            4096,
+        )
+        mask_selected = tf.gather_nd(mask[None], inds)
+        kp_offsets, cp_offsets = PvnLoss.get_offst(
+            RT[None].astype(np.float32),
+            xyz,
+            mask_selected,
+            self.mesh_kpts[None].astype(np.float32),
+        )
+        # [1, n_pts, 8, 3] | [1, n_pts, 1, 3]
+
+        all_offsets = np.concatenate([kp_offsets, cp_offsets], axis=-2)  # [b, n_pts, 9, 3]
+
+        offset_views = {}
+        cam_cx, cam_cy = intrinsics[0, 2], intrinsics[1, 2]  # [b]
+        cam_fx, cam_fy = intrinsics[0, 0], intrinsics[1, 1]  # [b]
+
+        def to_image(pts):
+            coors = (
+                pts[..., :2] / pts[..., 2:] * tf.stack([cam_fx, cam_fy], axis=0)[tf.newaxis, :]
+                + tf.stack([cam_cx, cam_cy], axis=0)[tf.newaxis, :]
+            )
+            coors = tf.floor(coors)
+            return tf.concat([coors, pts[..., 2:]], axis=-1).numpy()
+
+        projected_keypoints = self.mesh_kpts @ RT[:3, :3].T + RT[:3, 3]
+        projected_keypoints = to_image(projected_keypoints)
+
+        # for each pcd point add the offset
+        keypoints_from_pcd = xyz[:, :, None, :].numpy() + all_offsets  # [b, n_pts, 9, 3]
+        keypoints_from_pcd = to_image(keypoints_from_pcd.astype(np.float32))
+
+        projected_pcd = to_image(xyz)
+
+        for i in range(9):
+            offset_view = np.zeros_like(rgb, dtype=np.uint8)
+
+            # get color hue from offset
+            hue = np.arctan2(all_offsets[0, :, i, 1], all_offsets[0, :, i, 0]) / np.pi
+            hue = (hue + 1) / 2
+            hue = (hue * 180).astype(np.uint8)
+            # value = np.ones_like(hue) * 255
+            value = (np.linalg.norm(all_offsets[0, :, i, :], axis=-1) / 0.1 * 255).astype(np.uint8)
+            hsv = np.stack([hue, np.ones_like(hue) * 255, value], axis=-1)
+            colored_offset = cv2.cvtColor(hsv[None], cv2.COLOR_HSV2RGB).astype(np.uint8)
+
+            for point, color in zip(projected_pcd[0], colored_offset[0]):
+                cv2.circle(
+                    offset_view,
+                    tuple(map(int, point[:2])),
+                    int(_crop_factor),
+                    tuple(map(int, color)),
+                    -1,
+                )
+
+            # for start, target, color in zip(projected_pcd[0], keypoints_from_pcd[0, :, i, :], colored_offset[0]):
+            #     # over all pcd points
+            #     cv2.line(
+            #         offset_view,
+            #         tuple(map(int, start[:2])),
+            #         tuple(map(int, target[:2])),
+            #         tuple(map(int, color)),
+            #         1)
+
+            # # mark correct keypoint
+            cv2.drawMarker(
+                offset_view,
+                (int(projected_keypoints[i, 0]), int(projected_keypoints[i, 1])),
+                (0, 255, 0),
+                markerType=cv2.MARKER_CROSS,
+                markerSize=20,
+                thickness=1,
+            )
+
+            h, w = offset_view.shape[:2]
+            y1, x1, y2, x2 = _bbox[0]
+            x1 = np.clip(x1 - 100, 0, w)
+            x2 = np.clip(x2 + 100, 0, w)
+            y1 = np.clip(y1 - 100, 0, h)
+            y2 = np.clip(y2 + 100, 0, h)
+            offset_view = offset_view[y1:y2, x1:x2]
+            name = f"Keypoint {i}" if i < 8 else "Center"
+            offset_views.update({name: offset_view})
 
         (
             y1,
@@ -183,9 +301,7 @@ class _Blender(_Dataset):
         cv2.rectangle(rgb, (x1, y1), (x2, y2), (0, 255, 0), 2)
         rvec = cv2.Rodrigues(RT[:3, :3])[0]
         tvec = RT[:3, 3]
-        cv2.drawFrameAxes(
-            rgb, intrinsics, np.zeros((4,)), rvec=rvec, tvec=tvec, length=0.1
-        )
+        cv2.drawFrameAxes(rgb, intrinsics, np.zeros((4,)), rvec=rvec, tvec=tvec, length=0.1)
 
         c1, c2 = st.columns(2)
         c1.image(rgb, caption=f"RGB_L {rgb.shape} ({rgb.dtype})")
@@ -194,9 +310,15 @@ class _Blender(_Dataset):
             caption=f"Depth {depth.shape} ({depth.dtype})",
         )
         c1.image(mask * 255, caption=f"Mask {mask.shape} ({mask.dtype})")
+
         c2.write(intrinsics)
         c2.write(kpts)
         c2.write(RT)
+
+        cols = it.cycle(st.columns(3))
+
+        for col, (name, offset_view) in zip(cols, offset_views.items()):
+            col.image(offset_view, caption=name)
 
     def __next__(self):
         data = self[self._current]

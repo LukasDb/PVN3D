@@ -1,5 +1,7 @@
+tensorflow==2.9.3
 focal_loss
 albumentations
 tensorflow_addons
 scipy
 segmentation_models
+millify

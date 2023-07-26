@@ -12,8 +12,8 @@ Callbacks: # TO be revised
   - ModelCheckpoint
   #- ReduceLROnPlateau
   #- terminate on nan
-gpus: # if multiple gpus then distributed training is used
-  - 3
+gpus:
+  - 0
 model_compile:
   run_eagerly: false
 model_fit:
@@ -28,21 +28,21 @@ Adam:
   
 TrainBlender:
   batch_size: 32
-  root: "/home/lukas/data/blender/blender"
+  root: "/media/lukas/G-RAID/datasets/blender"
   data_name: cps
-  cls_type: cpsduck
+  cls_type: chew_toy
   train_split: 0.9
   #cutoff: 1000
   use_cache: true
   im_size:
     - 1080
     - 1920
-    
+
 ValBlender: &val_config
   batch_size: 32
-  root: "/home/lukas/data/blender/blender"
+  root: "/media/lukas/G-RAID/datasets/blender"
   data_name: cps
-  cls_type: cpsduck
+  cls_type: chew_toy
   train_split: 0.9
   #cutoff: 1000
   use_cache: true
@@ -107,12 +107,12 @@ PVN3D_E2E:
 
 
 DemoInference:
-  num_validate: 10
+  num_validate: 5
   data_cfg: *val_config
 
 
 PvnLoss:
   binary_loss: True
-  kp_loss_discount: 10.0 # is in the range of m -> ~0.02
-  cp_loss_discount: 10.0 # same
-  seg_loss_discount: 0.001 # starts at 6 end of epoch 1: 70
+  kp_loss_discount: 1.0
+  cp_loss_discount: 1.0
+  seg_loss_discount: 0.1

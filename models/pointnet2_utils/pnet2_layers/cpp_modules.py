@@ -7,12 +7,8 @@ from tensorflow.python.framework import ops
 from tensorflow.keras.layers import MaxPool1D, Layer
 
 tf_ops_root = os.path.join(os.path.dirname(__file__), os.pardir, "tf_ops")
-sampling_module = tf.load_op_library(
-    os.path.join(tf_ops_root, "sampling", "tf_sampling_so.so")
-)
-grouping_module = tf.load_op_library(
-    os.path.join(tf_ops_root, "grouping", "tf_grouping_so.so")
-)
+sampling_module = tf.load_op_library(os.path.join(tf_ops_root, "sampling", "tf_sampling_so.so"))
+grouping_module = tf.load_op_library(os.path.join(tf_ops_root, "grouping", "tf_grouping_so.so"))
 interpolate_module = tf.load_op_library(
     os.path.join(tf_ops_root, "3d_interpolation", "tf_interpolate_so.so")
 )
@@ -100,4 +96,5 @@ try:
         ]
 
 except KeyError:
-    print("TF ops already loaded")
+    pass
+    # print("TF ops already loaded")

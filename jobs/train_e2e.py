@@ -1,35 +1,112 @@
+from tqdm import tqdm
+from millify import millify
+import tensorflow as tf
 import numpy as np
 import cv2
-import tensorflow as tf
-from cvde.job.job_tracker import JobTracker
-from cvde.tf import callback as cb
-from datasets.blender import ValBlender
-import open3d as o3d
 from pathlib import Path
+import open3d as o3d
 import random
 
+import cvde
+from models.pvn3d_e2e import PVN3D_E2E
+from datasets.blender import TrainBlender, ValBlender
+from losses.pvn_loss import PvnLoss
 
-class DemoInference(cb.Callback):
-    def __init__(self, tracker: JobTracker, **kwargs):
-        super().__init__(tracker, **kwargs)
-        self.num_validate = kwargs["num_validate"]
-        ds = ValBlender(**kwargs["data_cfg"])
-        self.demo_set = ds.to_tf_dataset().take(self.num_validate)
-        self.color_seg = ds.color_seg
+
+class TrainE2E(cvde.job.Job):
+    def run(self):
+        job_cfg = self.config
+
+        self.num_validate = job_cfg["DemoInference"]["num_validate"]
+
+        self.color_seg = ValBlender.color_seg
         mesh_path = (
-            Path(kwargs["data_cfg"]["root"])
-            / kwargs["data_cfg"]["data_name"]
+            Path(job_cfg["DemoInference"]["data_cfg"]["root"])
+            / job_cfg["DemoInference"]["data_cfg"]["data_name"]
             / "meshes"
-            / (kwargs["data_cfg"]["cls_type"] + ".ply")
+            / (job_cfg["DemoInference"]["data_cfg"]["cls_type"] + ".ply")
         )
         self.mesh = o3d.io.read_triangle_mesh(str(mesh_path))
 
         self.mesh_vertices = np.asarray(self.mesh.sample_points_poisson_disk(1000).points)
 
-    def on_train_begin(self, logs=None):
-        self.on_epoch_end(-1, logs=logs)
+        # available_gpus = tf.config.experimental.list_physical_devices("GPU")
+        # selected_gpus = [
+        #     x.name.split("physical_device:")[-1]
+        #     for x in available_gpus
+        #     if int(x.name.split(":")[-1]) in job_cfg["gpus"]
+        # ]
+        # if False and len(selected_gpus) > 1:
+        #     print("Using mirrored strategy with ", selected_gpus)
+        #     strategy = tf.distribute.MirroredStrategy(selected_gpus)
+        #     print(strategy)
+        # else:
+        strategy = tf.distribute.get_strategy()
 
-    def on_epoch_end(self, epoch: int, logs=None):
+        print("ACTIVE GPUS: ", tf.config.experimental.list_physical_devices("GPU"))
+        print("Running job: ", self.name)
+
+        with strategy.scope():
+            # model: tf.keras.Model = load_model(job_cfg["Model"], **job_cfg)
+            self.model = model = PVN3D_E2E(**job_cfg["PVN3D_E2E"])
+            train_set = TrainBlender(**job_cfg["TrainBlender"])
+            val_set = ValBlender(**job_cfg["ValBlender"])
+        self.demo_set = ValBlender(**job_cfg["ValBlender"]).to_tf_dataset().take(self.num_validate)
+
+        self.loss_fn = loss_fn = PvnLoss(**job_cfg["PvnLoss"])
+        optimizer = tf.keras.optimizers.Adam(**job_cfg["Adam"])
+
+        self.log_visualization(-1)
+
+        num_epochs = job_cfg["model_fit"]["epochs"]
+        for epoch in range(num_epochs):
+            bar = tqdm(total=len(train_set), desc=f"Train ({epoch}/{num_epochs})")
+
+            loss_vals = {}
+            for x, y in train_set.to_tf_dataset():
+                if self.is_stopped:
+                    return
+
+                with tf.GradientTape() as tape:
+                    pred = model(x, training=True)
+                    loss_combined, loss_cp, loss_kp, loss_seg = loss_fn(y, pred)
+                gradients = tape.gradient(loss_combined, model.trainable_variables)
+                optimizer.apply_gradients(zip(gradients, model.trainable_variables))
+
+                loss_vals["loss"] = loss_vals.get("loss", []) + [loss_combined.numpy()]
+                loss_vals["loss_cp"] = loss_vals.get("loss_cp", []) + [loss_cp.numpy()]
+                loss_vals["loss_kp"] = loss_vals.get("loss_kp", []) + [loss_kp.numpy()]
+                loss_vals["loss_seg"] = loss_vals.get("loss_seg", []) + [loss_seg.numpy()]
+
+                bar.update(1)  # update by batchsize
+                bar.set_postfix(
+                    {
+                        "loss": millify(loss_combined.numpy(), precision=4),
+                    }
+                )
+            bar.close()
+            for k, v in loss_vals.items():
+                loss_vals[k] = tf.reduce_mean(v)
+                self.tracker.log(f"train_{k}", loss_vals[k], epoch)
+
+            loss_vals = {}
+            for x, y in tqdm(
+                val_set.to_tf_dataset(),
+                desc=f"Val ({epoch}/{num_epochs})",
+                total=len(val_set),
+            ):
+                pred = model(x, training=True)
+                l = loss_fn(y, pred)
+                for k, v in zip(["loss", "loss_cp", "loss_kp", "loss_seg"], l):
+                    loss_vals[k] = loss_vals.get(k, []) + [v]
+
+            for k, v in loss_vals.items():
+                loss_vals[k] = tf.reduce_mean(v)
+                self.tracker.log(f"val_{k}", loss_vals[k], epoch)
+
+            self.log_visualization(epoch)
+
+    def log_visualization(self, epoch: int, logs=None):
         i = 0
         for x, y in self.demo_set:
             (
@@ -94,7 +171,7 @@ class DemoInference(cb.Callback):
 
             # get gt offsets
             b_mask_selected = tf.gather_nd(b_mask, b_sampled_inds)
-            b_kp_offsets_gt, b_cp_offsets_gt = self.model.loss.get_offst(
+            b_kp_offsets_gt, b_cp_offsets_gt = self.loss_fn.get_offst(
                 b_RT_gt,
                 b_xyz,
                 b_mask_selected,
@@ -126,13 +203,13 @@ class DemoInference(cb.Callback):
                 b_crop_factor,
             ):
                 vis_seg = self.draw_segmentation(rgb.copy(), sampled_inds, seg_pred, roi)
-                self.log_image(f"RGB ({i})", vis_seg)
+                self.tracker.log(f"RGB ({i})", vis_seg, index=epoch)
 
                 vis_mesh = self.draw_object_mesh(rgb.copy(), roi, mesh_vertices)
-                self.log_image(f"RGB (mesh) ({i})", vis_mesh)
+                self.tracker.log(f"RGB (mesh) ({i})", vis_mesh, index=epoch)
 
                 vis_kpts = self.draw_keypoint_correspondences(rgb.copy(), roi, kpts_gt, kpts_pred)
-                self.log_image(f"RGB (kpts) ({i})", vis_kpts)
+                self.tracker.log(f"RGB (kpts) ({i})", vis_kpts, index=epoch)
 
                 vis_offsets = self.draw_keypoint_offsets(
                     rgb.copy(),
@@ -152,7 +229,7 @@ class DemoInference(cb.Callback):
                 )
                 # assemble images side-by-side
                 vis_offsets = np.concatenate([vis_offsets, vis_offsets_gt], axis=1)
-                self.log_image(f"RGB (offsets) ({i})", vis_offsets)
+                self.tracker.log(f"RGB (offsets) ({i})", vis_offsets, index=epoch)
 
                 i = i + 1
                 if i >= self.num_validate:

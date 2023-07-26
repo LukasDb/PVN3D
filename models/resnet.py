@@ -1,4 +1,7 @@
 import tensorflow as tf
+import os
+
+os.environ["SM_FRAMEWORK"] = "tf.keras"
 from .backbone import get_backbone_model
 from dataclasses import dataclass
 
@@ -32,5 +35,7 @@ class _ResNet:
         )
 
         output_features = resnet_model(input_layer)
-        model = tf.keras.Model(inputs=input_layer, outputs=output_features, name=self.params.backbone_type)
+        model = tf.keras.Model(
+            inputs=input_layer, outputs=output_features, name=self.params.backbone_type
+        )
         return model

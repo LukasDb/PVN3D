@@ -70,9 +70,7 @@ class PVN3D_E2E(_PVN3D):
 
     @staticmethod
     def compute_normal_map(depth, camera_matrix):
-        kernel = tf.constant(
-            [[[[0.5, 0.5]], [[-0.5, 0.5]]], [[[0.5, -0.5]], [[-0.5, -0.5]]]]
-        )
+        kernel = tf.constant([[[[0.5, 0.5]], [[-0.5, 0.5]]], [[[0.5, -0.5]], [[-0.5, -0.5]]]])
 
         diff = tf.nn.conv2d(depth, kernel, 1, "VALID")
 
@@ -94,9 +92,7 @@ class PVN3D_E2E(_PVN3D):
         diff = tf.where(mask, diff, 0.0)
 
         smooth = tf.constant(4)
-        kernel2 = tf.cast(
-            tf.tile([[1 / tf.pow(smooth, 2)]], (smooth, smooth)), tf.float32
-        )
+        kernel2 = tf.cast(tf.tile([[1 / tf.pow(smooth, 2)]], (smooth, smooth)), tf.float32)
         kernel2 = tf.expand_dims(tf.expand_dims(kernel2, axis=-1), axis=-1)
         kernel2 = kernel2 * tf.eye(2, batch_shape=(1, 1))
         diff2 = tf.nn.conv2d(diff, kernel2, 1, "VALID")
@@ -117,9 +113,7 @@ class PVN3D_E2E(_PVN3D):
         return v_norm
 
     @staticmethod
-    def pcld_processor_tf(
-        rgb, depth, camera_matrix, roi, num_sample_points, depth_trunc=2.0
-    ):
+    def pcld_processor_tf(rgb, depth, camera_matrix, roi, num_sample_points, depth_trunc=2.0):
         # depth: [b, h, w, 1]
         # rgb: [b, h, w, 3]
         # camera_matrix: [b, 3, 3]
@@ -146,12 +140,9 @@ class PVN3D_E2E(_PVN3D):
             x_map[tf.newaxis, :, :] < x2[:, tf.newaxis, tf.newaxis],
         )
         in_roi = tf.logical_and(in_y, in_x)
-        # depth_roi_masked = tf.where(in_roi[:, :, :], depth[..., 0], 0.0)
 
         # get masked indices (valid truncated depth inside of roi)
-        is_valid_depth = tf.logical_and(
-            depth[..., 0] > 1e-6, depth[..., 0] < depth_trunc
-        )
+        is_valid_depth = tf.logical_and(depth[..., 0] > 1e-6, depth[..., 0] < depth_trunc)
         inds = tf.where(
             tf.logical_and(in_roi, is_valid_depth)
         )  # [b*h*w, 3], last dimension is [batch_index, y_index, x_index]
@@ -228,9 +219,7 @@ class PVN3D_E2E(_PVN3D):
     ):
         b = tf.shape(sampled_inds_in_original_image)[0]
 
-        crop_top_left = tf.concat(
-            (tf.zeros((b, 1), tf.int32), bbox[:, :2]), -1
-        )  # [b, 3]
+        crop_top_left = tf.concat((tf.zeros((b, 1), tf.int32), bbox[:, :2]), -1)  # [b, 3]
 
         sampled_inds_in_roi = (
             sampled_inds_in_original_image - crop_top_left[:, tf.newaxis, :]
@@ -270,7 +259,7 @@ class PVN3D_E2E(_PVN3D):
         )
 
         norm_bbox = tf.cast(bbox / [h, w, h, w], tf.float32)  # normalize bounding box
-        rgb = tf.image.crop_and_resize(
+        cropped_rgbs = tf.image.crop_and_resize(
             full_rgb,
             norm_bbox,
             tf.range(tf.shape(full_rgb)[0]),
@@ -278,18 +267,14 @@ class PVN3D_E2E(_PVN3D):
         )
 
         pcld_emb = self.pointnet2_model((xyz, feats), training=training)
-        resnet_feats = self.resnet_model(rgb, training=training)
-        rgb_features = self.psp_model(
-            resnet_feats, training=training
-        )  # [b, h_res, w_res, c]
+        resnet_feats = self.resnet_model(cropped_rgbs, training=training)
+        rgb_features = self.psp_model(resnet_feats, training=training)  # [b, h_res, w_res, c]
         rgb_emb = tf.gather_nd(rgb_features, sampled_inds_in_roi)
         feats_fused = self.dense_fusion_model([rgb_emb, pcld_emb], training=training)
         kp, seg, cp = self.mlp_model(feats_fused, training=training)
 
         if not training:
-            batch_R, batch_t, voted_kpts = self.initial_pose_model(
-                [xyz, kp, cp, seg, mesh_kpts]
-            )
+            batch_R, batch_t, voted_kpts = self.initial_pose_model([xyz, kp, cp, seg, mesh_kpts])
             return (
                 batch_R,
                 batch_t,
@@ -299,31 +284,3 @@ class PVN3D_E2E(_PVN3D):
 
         return kp, seg, cp, xyz, sampled_inds_in_original_image, mesh_kpts
 
-    def train_step(self, data):
-        x = data[0]
-        y = data[1]
-        # PROBLEM:
-        # multiple outputs are not supported by the default implementation of train_step
-        # each output gets mapped to a loss function, like this:
-        # for y_gt, y_pred, loss in zip(y, y_pred, self.losses):
-        #     loss(y_gt, y_pred)
-        # this is why we changed self.compiled_loss to self.loss
-        batch_size = tf.cast(tf.shape(x[0])[0], tf.float32)
-        with tf.GradientTape() as tape:
-            y_pred = self(x, training=True)  # Forward pass
-            loss = self.loss(y, y_pred) / batch_size
-        trainable_vars = self.trainable_variables
-        gradients = tape.gradient(loss, trainable_vars)
-
-        self.optimizer.apply_gradients(zip(gradients, trainable_vars))
-
-        return {"loss": loss}
-
-    def test_step(self, data):
-        x = data[0]
-        y = data[1]
-        batch_size = tf.cast(tf.shape(x[0])[0], tf.float32)
-        _, _, _, y_pred = self(x, training=False)
-        loss = self.loss(y, y_pred)
-        loss = loss / batch_size
-        return {"loss": loss}
