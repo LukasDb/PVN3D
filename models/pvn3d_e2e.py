@@ -219,16 +219,26 @@ class PVN3D_E2E(_PVN3D):
     ):
         b = tf.shape(sampled_inds_in_original_image)[0]
 
+        # sampled_inds_in_original_image: [b, num_points, 3]
+        # with last dimension is index into [b, h, w]
+        # crop_factor: [b, ]
+
         crop_top_left = tf.concat((tf.zeros((b, 1), tf.int32), bbox[:, :2]), -1)  # [b, 3]
 
-        sampled_inds_in_roi = (
-            sampled_inds_in_original_image - crop_top_left[:, tf.newaxis, :]
-        )  #  [b, num_points, 3]
-        sampled_inds_in_roi = (
-            sampled_inds_in_roi / crop_factor[:, tf.newaxis, tf.newaxis]
-        )  # [b, num_points, 3]
-        sampled_inds_in_roi = tf.cast(sampled_inds_in_roi, tf.int32)
-        return sampled_inds_in_roi
+        sampled_inds_in_roi = sampled_inds_in_original_image - crop_top_left[:, tf.newaxis, :]
+
+        # apply scaling to indices, BUT ONLY H AND W
+        crop_factor_bhw = tf.concat(
+            (
+                tf.ones((b, 1), dtype=tf.int32),
+                crop_factor[:, tf.newaxis],
+                crop_factor[:, tf.newaxis],
+            ),
+            -1,
+        )  # [b, 3]
+        sampled_inds_in_roi = sampled_inds_in_roi / crop_factor_bhw[:, tf.newaxis, :]
+
+        return tf.cast(sampled_inds_in_roi, tf.int32)
 
     @tf.function
     def call(self, inputs, training=None):
@@ -240,6 +250,10 @@ class PVN3D_E2E(_PVN3D):
             mesh_kpts,
         ) = inputs  # rgb [b,h,w,3], depth: [b,h,w,1], intrinsics: [b, 3,3], roi: [b,4]
         h, w = tf.shape(full_rgb)[1], tf.shape(full_rgb)[2]
+
+        if training:
+            # inject noise to the roi
+            roi = roi + tf.random.uniform(tf.shape(roi), -20, 20, dtype=tf.int32)
 
         # crop the image to the aspect ratio for resnet and integer crop factor
         bbox, crop_factor = self.get_crop_index(
@@ -279,8 +293,7 @@ class PVN3D_E2E(_PVN3D):
                 batch_R,
                 batch_t,
                 voted_kpts,
-                (kp, seg, cp, xyz, sampled_inds_in_original_image, mesh_kpts),
+                (kp, seg, cp, xyz, sampled_inds_in_original_image, mesh_kpts, cropped_rgbs),
             )
 
-        return kp, seg, cp, xyz, sampled_inds_in_original_image, mesh_kpts
-
+        return kp, seg, cp, xyz, sampled_inds_in_original_image, mesh_kpts, cropped_rgbs
