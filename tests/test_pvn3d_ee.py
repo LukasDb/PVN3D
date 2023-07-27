@@ -69,11 +69,13 @@ def test_index_transform():
         [
             [0, 0, 160, 160],
             [0, 0, 320, 320],
+            [0, 0, 320, 320]
         ]
     )
     crop_factor = np.array(
         [
             1,
+            2,
             2,
         ]
     )
@@ -87,9 +89,14 @@ def test_index_transform():
                 [0, 159, 159],  # bottom right corner
             ],
             [
-                [0, 0, 0],  # top left corner
-                [0, 159, 159],  # center point
-                [0, 319, 319],  # bottom right corner
+                [1, 0, 0],  # top left corner
+                [1, 159, 159],  # center point
+                [1, 319, 319],  # bottom right corner
+            ],
+            [
+                [2, 0, 0],  # top left corner
+                [2, 159, 159],  # center point
+                [2, 319, 319],  # bottom right corner
             ],
         ]
     )
@@ -106,9 +113,14 @@ def test_index_transform():
                 [0, 159, 159],
             ],
             [
-                [0, 0, 0],
-                [0, 79, 79],  # center point
-                [0, 159, 159],  # still bottom right corner of smaller bounding box
+                [1, 0, 0],
+                [1, 79, 79],  # center point
+                [1, 159, 159],  # still bottom right corner of smaller bounding box
+            ],
+            [
+                [2, 0, 0],
+                [2, 79, 79],  # center point
+                [2, 159, 159],  # still bottom right corner of smaller bounding box
             ],
         ]
     )

@@ -17,30 +17,8 @@ class TrainE2E(cvde.job.Job):
     def run(self):
         job_cfg = self.config
 
-        self.num_validate = job_cfg["DemoInference"]["num_validate"]
-
-        self.color_seg = ValBlender.color_seg
-        mesh_path = (
-            Path(job_cfg["DemoInference"]["data_cfg"]["root"])
-            / job_cfg["DemoInference"]["data_cfg"]["data_name"]
-            / "meshes"
-            / (job_cfg["DemoInference"]["data_cfg"]["cls_type"] + ".ply")
-        )
-        self.mesh = o3d.io.read_triangle_mesh(str(mesh_path))
-
-        self.mesh_vertices = np.asarray(self.mesh.sample_points_poisson_disk(1000).points)
-
-        # available_gpus = tf.config.experimental.list_physical_devices("GPU")
-        # selected_gpus = [
-        #     x.name.split("physical_device:")[-1]
-        #     for x in available_gpus
-        #     if int(x.name.split(":")[-1]) in job_cfg["gpus"]
-        # ]
-        # if False and len(selected_gpus) > 1:
-        #     print("Using mirrored strategy with ", selected_gpus)
-        #     strategy = tf.distribute.MirroredStrategy(selected_gpus)
-        #     print(strategy)
-        # else:
+        self.num_validate = job_cfg["num_validate"]
+        
         strategy = tf.distribute.get_strategy()
 
         print("ACTIVE GPUS: ", tf.config.experimental.list_physical_devices("GPU"))
@@ -53,12 +31,15 @@ class TrainE2E(cvde.job.Job):
             val_set = ValBlender(**job_cfg["ValBlender"])
         self.demo_set = ValBlender(**job_cfg["ValBlender"]).to_tf_dataset().take(self.num_validate)
 
+        self.color_seg = val_set.color_seg
+        self.mesh_vertices = np.asarray(val_set.mesh.sample_points_poisson_disk(1000).points)
+
         self.loss_fn = loss_fn = PvnLoss(**job_cfg["PvnLoss"])
         optimizer = tf.keras.optimizers.Adam(**job_cfg["Adam"])
 
         self.log_visualization(-1)
 
-        num_epochs = job_cfg["model_fit"]["epochs"]
+        num_epochs = job_cfg["epochs"]
         for epoch in range(num_epochs):
             bar = tqdm(total=len(train_set), desc=f"Train ({epoch}/{num_epochs})")
 
@@ -95,7 +76,7 @@ class TrainE2E(cvde.job.Job):
                 desc=f"Val ({epoch}/{num_epochs})",
                 total=len(val_set),
             ):
-                pred = model(x, training=True)
+                _, _, _, pred = model(x, training=False)
                 l = loss_fn(y, pred)
                 for k, v in zip(["loss", "loss_cp", "loss_kp", "loss_seg"], l):
                     loss_vals[k] = loss_vals.get(k, []) + [v]
@@ -123,7 +104,7 @@ class TrainE2E(cvde.job.Job):
                 b_R,
                 b_t,
                 b_kpts_pred,
-                (b_kp_offset, b_seg_pred, b_cp_offset, b_xyz, b_sampled_inds, _),
+                (b_kp_offset, b_seg_pred, b_cp_offset, b_xyz, b_sampled_inds, _, b_cropped_rgb),
             ) = self.model(x, training=False)
 
             h, w = tf.shape(b_rgb)[1], tf.shape(b_rgb)[2]
@@ -141,6 +122,7 @@ class TrainE2E(cvde.job.Job):
             b_seg_pred = b_seg_pred.numpy()
             b_sampled_inds = b_sampled_inds.numpy()
             b_kp_offset = b_kp_offset.numpy()
+            b_cropped_rgb = b_cropped_rgb.numpy()
             b_cp_offset = b_cp_offset.numpy()
             b_offsets = np.concatenate([b_kp_offset, b_cp_offset], axis=2)
 
@@ -181,6 +163,7 @@ class TrainE2E(cvde.job.Job):
 
             for (
                 rgb,
+                crop_rgb,
                 roi,
                 seg_pred,
                 sampled_inds,
@@ -192,6 +175,7 @@ class TrainE2E(cvde.job.Job):
                 crop_factor,
             ) in zip(
                 b_rgb,
+                b_cropped_rgb,
                 b_roi,
                 b_seg_pred,
                 b_sampled_inds,
@@ -204,6 +188,8 @@ class TrainE2E(cvde.job.Job):
             ):
                 vis_seg = self.draw_segmentation(rgb.copy(), sampled_inds, seg_pred, roi)
                 self.tracker.log(f"RGB ({i})", vis_seg, index=epoch)
+                
+                self.tracker.log(f"RGB (crop) ({i})", crop_rgb.astype(np.uint8), index=epoch)
 
                 vis_mesh = self.draw_object_mesh(rgb.copy(), roi, mesh_vertices)
                 self.tracker.log(f"RGB (mesh) ({i})", vis_mesh, index=epoch)

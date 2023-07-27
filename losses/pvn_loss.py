@@ -24,7 +24,6 @@ class PvnLoss:
             from_logits=True, reduction=red
         )
 
-    @tf.function
     def __call__(self, y_true, y_pred):
         rt, mask = y_true[0], y_true[1]
 
@@ -32,7 +31,6 @@ class PvnLoss:
         xyz, sampled_inds, kpts_cpts = y_pred[3], y_pred[4], y_pred[5]
 
         mask_selected = tf.gather_nd(mask, sampled_inds)
-
         kp_gt, cp_gt = self.get_offst(
             rt,
             xyz,

@@ -1,33 +1,11 @@
-# -- RESERVED --
-# Define your Job
-Train_Dataset: TrainBlender
-Val_Dataset: ValBlender
-Model: PVN3D_E2E
-Loss: PvnLoss
-Metrics:
-  - accuracy
-Optimizer: Adam
-Callbacks: # TO be revised
-  - DemoInference
-  - ModelCheckpoint
-  #- ReduceLROnPlateau
-  #- terminate on nan
-gpus:
-  - 0
-model_compile:
-  run_eagerly: false
-model_fit:
-  epochs: 20
-  validation_freq: 1
-
-# --- ---
-# Define Kwargs for modules below
+epochs: 20
+num_validate: 5
 
 Adam:
   learning_rate: 0.0001
   
 TrainBlender:
-  batch_size: 32
+  batch_size: 4
   root: "/media/lukas/G-RAID/datasets/blender"
   data_name: cps
   cls_type: chew_toy
@@ -39,7 +17,7 @@ TrainBlender:
     - 1920
 
 ValBlender: &val_config
-  batch_size: 32
+  batch_size: 4
   root: "/media/lukas/G-RAID/datasets/blender"
   data_name: cps
   cls_type: chew_toy
@@ -86,7 +64,7 @@ PVN3D_E2E:
     keep_prob: 0.5
     return_features: true
     use_tf_interpolation: true
-    n_sample_points: 4096
+    n_sample_points: 2048
   dense_fusion_params:
     num_embeddings  : 128
     conv1d_kernel: 1
@@ -104,12 +82,6 @@ PVN3D_E2E:
     seg_conv1d_1_dim: 128
     seg_conv1d_2_dim: 64
     seg_conv1d_3_dim: 16
-
-
-DemoInference:
-  num_validate: 5
-  data_cfg: *val_config
-
 
 PvnLoss:
   binary_loss: True

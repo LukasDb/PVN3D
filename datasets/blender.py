@@ -14,6 +14,7 @@ from cvde.tf import Dataset as _Dataset
 import streamlit as st
 from functools import cached_property
 import itertools as it
+import open3d as o3d
 
 
 class _Blender(_Dataset):
@@ -156,6 +157,7 @@ class _Blender(_Dataset):
             depth,
             tf.random.uniform(shape=depth.shape, minval=0.3, maxval=1.5),
         )
+        depth = depth + tf.random.uniform(shape=depth.shape, minval=-0.02, maxval=0.02)
         return (rgb, depth, intrinsics, roi, mesh_kpts), (RT, mask)
 
     def get_roots_and_ids_for_cls_root(self, cls_root: pathlib.Path):
@@ -183,15 +185,6 @@ class _Blender(_Dataset):
 
         RT = example[1][0]
         mask = example[1][1]
-
-        #   @staticmethod
-        #     def get_offst(
-        #         RT,  # [b, 4,4]
-        #         pcld_xyz,  # [b, n_pts, 3]
-        #         mask_selected,  # [b, n_pts, 1] 0|1
-        #         kpts_cpts,  # [b, 9,3]
-        #     ):
-        #         return kp_offsets, cp_offsets
 
         from losses.pvn_loss import PvnLoss
         from models.pvn3d_e2e import PVN3D_E2E
@@ -239,11 +232,13 @@ class _Blender(_Dataset):
         # for each pcd point add the offset
         keypoints_from_pcd = xyz[:, :, None, :].numpy() + all_offsets  # [b, n_pts, 9, 3]
         keypoints_from_pcd = to_image(keypoints_from_pcd.astype(np.float32))
-
-        projected_pcd = to_image(xyz)
+        projected_pcd = to_image(xyz)  # [b, n_pts, 3]
 
         for i in range(9):
             offset_view = np.zeros_like(rgb, dtype=np.uint8)
+
+            # sort pcd from back to front
+            # inds = np.argsort(keypoints_from_pcd[0, :, i, 2])[::-1]
 
             # get color hue from offset
             hue = np.arctan2(all_offsets[0, :, i, 1], all_offsets[0, :, i, 0]) / np.pi
@@ -254,23 +249,32 @@ class _Blender(_Dataset):
             hsv = np.stack([hue, np.ones_like(hue) * 255, value], axis=-1)
             colored_offset = cv2.cvtColor(hsv[None], cv2.COLOR_HSV2RGB).astype(np.uint8)
 
-            for point, color in zip(projected_pcd[0], colored_offset[0]):
-                cv2.circle(
-                    offset_view,
-                    tuple(map(int, point[:2])),
-                    int(_crop_factor),
-                    tuple(map(int, color)),
-                    -1,
-                )
-
-            # for start, target, color in zip(projected_pcd[0], keypoints_from_pcd[0, :, i, :], colored_offset[0]):
-            #     # over all pcd points
-            #     cv2.line(
+            # for point, color in zip(projected_pcd[0, :], colored_offset[0]):
+            #     cv2.circle(
             #         offset_view,
-            #         tuple(map(int, start[:2])),
-            #         tuple(map(int, target[:2])),
+            #         tuple(map(int, point[:2])),
+            #         int(_crop_factor),
             #         tuple(map(int, color)),
-            #         1)
+            #         -1,
+            #     )
+
+            sorted_inds = np.argsort(np.linalg.norm(all_offsets[0, :, i, :], axis=-1), axis=-1)[
+                ::-1
+            ]
+            keypoints_from_pcd[0, :, i, :] = keypoints_from_pcd[0, sorted_inds, i, :]
+            colored_offset[0] = colored_offset[0, sorted_inds, :]
+            sorted_xyz = projected_pcd[0, sorted_inds, :]
+            for start, target, color in zip(
+                sorted_xyz, keypoints_from_pcd[0, :, i, :], colored_offset[0]
+            ):
+                # over all pcd points
+                cv2.line(
+                    offset_view,
+                    tuple(map(int, start[:2])),
+                    tuple(map(int, target[:2])),
+                    tuple(map(int, color)),
+                    1,
+                )
 
             # # mark correct keypoint
             cv2.drawMarker(
@@ -379,6 +383,11 @@ class _Blender(_Dataset):
         center = [np.loadtxt(mesh_kpts_path / "center.txt")]
         kpts_cpts = np.concatenate([kpts, center], axis=0)
         return kpts_cpts
+
+    @cached_property
+    def mesh(self) -> o3d.geometry.TriangleMesh:
+        mesh_path = self.data_root / "meshes" / (self.cls_type + ".ply")
+        return o3d.io.read_triangle_mesh(str(mesh_path))
 
     def get_RT_list(self, index):
         """return a list of tuples of RT matrix and cls_id [(RT_0, cls_id_0), (RT_1,, cls_id_1) ..., (RT_N, cls_id_N)]"""

@@ -36,22 +36,22 @@ def test_get_offst_centerpoint():
     # cp_offsets is the offsets between the centerpoint and the pointcloud
 
     # Define the keypoints of the cube
-    kpts_cpts = _get_cube_keypoints(1.0, 1.0, 1.0)
+    kpts_cpts = _get_cube_keypoints(1.0, 1.0, 1.0).astype(np.float32)
 
-    RT = np.eye(4)
+    RT = np.eye(4).astype(np.float32)
     RT[2, 3] = 1.0  # cube is 1m from camera, centered
     # this means the pointcloud is plane with the front of the cube
 
     # mock pointcloud as a 1x1m grid of points, 0.5m away from camera
     x, y = np.meshgrid(np.linspace(-0.5, 0.5, 3), np.linspace(-0.5, 0.5, 3))
-    pcld_xyz = np.zeros((9, 3))
+    pcld_xyz = np.zeros((9, 3)).astype(np.float32)
     pcld_xyz[:, 0] = [-0.5, 0.0, 0.5, -0.5, 0.0, 0.5, -0.5, 0.0, 0.5]
     pcld_xyz[:, 1] = [-0.5, -0.5, -0.5, 0.0, 0.0, 0.0, 0.5, 0.5, 0.5]
     pcld_xyz[:, 2] = 1.0  # [9,3]
     print("Testing with pointcloud:\n", pcld_xyz)
 
     # mock mask_selected as all points in the pointcloud
-    mask_selected = np.ones((9, 1))
+    mask_selected = np.ones((9, 1)).astype(np.uint8)
 
     # mock offsets as the difference between the keypoints and the pointcloud
     offsets_cp_gt = np.array(
