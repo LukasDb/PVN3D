@@ -2,32 +2,31 @@ epochs: 20
 num_validate: 5
 
 Adam:
-  learning_rate: 0.0001
-  
+  learning_rate: 0.001
+
 TrainBlender:
-  batch_size: 4
+  batch_size: 32
   root: "/media/lukas/G-RAID/datasets/blender"
   data_name: cps
-  cls_type: chew_toy
+  cls_type: stapler
   train_split: 0.9
   #cutoff: 1000
-  use_cache: true
+  use_cache: True
   im_size:
     - 1080
     - 1920
 
 ValBlender: &val_config
-  batch_size: 4
+  batch_size: 32
   root: "/media/lukas/G-RAID/datasets/blender"
   data_name: cps
-  cls_type: chew_toy
+  cls_type: stapler
   train_split: 0.9
   #cutoff: 1000
-  use_cache: true
+  use_cache: True
   im_size:
     - 1080
     - 1920
-
 
 PVN3D_E2E:
   resnet_input_shape: [160, 160, 3] # in 6IMPOSE: 80x80

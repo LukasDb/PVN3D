@@ -3,6 +3,8 @@ import numpy as np
 from numpy.testing import assert_array_equal, assert_array_almost_equal
 import cv2
 import open3d as o3d
+import time
+import pytest
 
 
 def test_crop_index():
@@ -44,9 +46,7 @@ def test_crop_index():
         ]
     )  # 640 / 160 == 4
 
-    for roi_, exp_bbox_, exp_crop_factor_ in zip(
-        roi, expected_bbox, expected_crop_factor
-    ):
+    for roi_, exp_bbox_, exp_crop_factor_ in zip(roi, expected_bbox, expected_crop_factor):
         roi_ = roi_[None, :]
         exp_bbox_ = exp_bbox_[None, :]
         exp_crop_factor_ = exp_crop_factor_[None]
@@ -69,13 +69,17 @@ def test_index_transform():
         [
             [0, 0, 160, 160],
             [0, 0, 320, 320],
-            [0, 0, 320, 320]
+            [0, 0, 320, 320],
+            [500, 500, 660, 660],
+            [500, 500, 820, 820],
         ]
     )
     crop_factor = np.array(
         [
             1,
             2,
+            2,
+            1,
             2,
         ]
     )
@@ -97,6 +101,16 @@ def test_index_transform():
                 [2, 0, 0],  # top left corner
                 [2, 159, 159],  # center point
                 [2, 319, 319],  # bottom right corner
+            ],
+            [
+                [3, 500, 500],  # top left corner
+                [3, 579, 579],  # center point
+                [3, 659, 659],  # bottom right corner
+            ],
+            [
+                [4, 500, 500],  # top left corner
+                [4, 659, 659],  # center point
+                [4, 819, 819],  # bottom right corner
             ],
         ]
     )
@@ -122,18 +136,33 @@ def test_index_transform():
                 [2, 79, 79],  # center point
                 [2, 159, 159],  # still bottom right corner of smaller bounding box
             ],
+            [
+                [3, 0, 0],
+                [3, 79, 79],  # center point
+                [3, 159, 159],  # still bottom right corner of smaller bounding box
+            ],
+            [
+                [4, 0, 0],
+                [4, 79, 79],  # center point
+                [4, 159, 159],  # still bottom right corner of smaller bounding box
+            ],
         ]
     )
 
-    assert_array_equal(sampled_inds_in_roi, expected_sampled_inds_in_roi)
+    for i in range(len(sampled_inds_in_roi)):
+        assert_array_equal(sampled_inds_in_roi[i], expected_sampled_inds_in_roi[i])
 
 
 def test_pcld_processor_tf():
     np.random.seed(0)
-    rgb = np.random.uniform(size=(1, 1080, 1920, 3), low=0, high=255).astype(np.uint8)
-    depth = np.random.uniform(size=(1, 1080, 1920, 1), low=0, high=5.0).astype(
-        np.float32
-    )
+    h = 1080
+    w = 1920
+    n_sample = 4096
+    depth_trunc = 2.0
+    b = 4
+
+    rgb = np.random.uniform(size=(b, h, w, 3), low=0, high=255).astype(np.uint8)
+    depth = np.random.uniform(size=(b, h, w, 1), low=0, high=5.0).astype(np.float32)
     # intrinsics of realsense d415 for 1920x1080
     camera_matrix = np.array(
         [
@@ -141,16 +170,19 @@ def test_pcld_processor_tf():
                 [1.0788e03, 0.0, 9.6000e02],
                 [0.0, 1.0788e03, 5.4000e02],
                 [0.0, 0.0, 1.0],
-            ],
+            ]
         ]
+        * b
     )
     roi = np.array(
         [
-            [0, 0, 160, 160],  # simplest case
+            [0, 0, 160, 160],
+            [0, 0, 320, 320],
+            [500, 500, 660, 660],
+            [500, 500, 820, 820],
         ]
     )
-    n_sample = 10
-    depth_trunc = 2.0
+    # run twise for tracing
     xyz, feats, inds = PVN3D_E2E.pcld_processor_tf(
         (rgb / 255).astype(np.float32),
         depth.astype(np.float32),
@@ -160,32 +192,55 @@ def test_pcld_processor_tf():
         depth_trunc,
     )
 
+    t_tf = time.perf_counter()
+    xyz, feats, inds = PVN3D_E2E.pcld_processor_tf(
+        (rgb / 255).astype(np.float32),
+        depth.astype(np.float32),
+        camera_matrix.astype(np.float32),
+        roi,
+        n_sample,
+        depth_trunc,
+    )
+    t_tf = time.perf_counter() - t_tf
+
     # feats is [..., :3] == rgb # normalized from 0 to 1
     #          [..., 3:] == normals
 
     # use open3d as reference
-    img_depth = o3d.geometry.Image(depth[0])
-    pinhole_camera_intrinsic = o3d.camera.PinholeCameraIntrinsic(
-        width=1920, height=1080, fx=1.0788e03, fy=1.0788e03, cx=9.6000e02, cy=5.4000e02
-    )
-    pcd = o3d.geometry.PointCloud.create_from_depth_image(
-        img_depth,
-        pinhole_camera_intrinsic,
-        depth_scale=1.0,
-        depth_trunc=depth_trunc,
-        project_valid_depth_only=False,
-    )
+    total_t_o3d = 0
+    for i in range(b):
+        t_o3d = time.perf_counter()
+        img_depth = o3d.geometry.Image(depth[i])
+        pinhole_camera_intrinsic = o3d.camera.PinholeCameraIntrinsic(
+            width=w,
+            height=h,
+            fx=camera_matrix[i, 0, 0],
+            fy=camera_matrix[i, 1, 1],
+            cx=camera_matrix[i, 0, 2],
+            cy=camera_matrix[i, 1, 2],
+        )
+        pcd = o3d.geometry.PointCloud.create_from_depth_image(
+            img_depth,
+            pinhole_camera_intrinsic,
+            depth_scale=1.0,
+            depth_trunc=depth_trunc,
+            project_valid_depth_only=False,
+        )
+        t_o3d = time.perf_counter() - t_o3d
 
-    # convert sampled_indices to flattened indices
-    sampled_indices = inds[0]
-    sampled_indices = sampled_indices[:, 1] * 1920 + sampled_indices[:, 2]
+        # convert sampled_indices to flattened indices
+        sampled_indices = inds[i]
+        sampled_indices = sampled_indices[:, 1] * w + sampled_indices[:, 2]
 
-    # sample points from pcd
-    pcd_points = np.asarray(pcd.points)[sampled_indices]
-    pcd_colors = (rgb / 255).astype(np.float32).reshape(-1, 3)[sampled_indices]
+        # sample points from pcd
+        pcd_points = np.asarray(pcd.points)[sampled_indices]
+        pcd_colors = (rgb[i] / 255).astype(np.float32).reshape(-1, 3)[sampled_indices]
+        total_t_o3d += t_o3d
 
-    assert_array_almost_equal(xyz[0], pcd_points)
-    assert_array_almost_equal(feats[0, :, :3], pcd_colors)
+        assert_array_almost_equal(xyz[i], pcd_points, decimal=5, err_msg=f"Pointcloud not equal for batch {i}")
+        assert_array_almost_equal(feats[i, :, :3], pcd_colors, decimal=5, err_msg=f"Colors not equal for batch {i}")
+
+    print(f"TIME FOR PCLD | tf: {t_tf}, o3d: {total_t_o3d}")
 
 
 def test_pvn3d_ee_normals():
@@ -195,9 +250,7 @@ def test_pvn3d_ee_normals():
     # )
     depth = np.ones(shape=(1, 1080, 1920, 1), dtype=np.float32)
     depth += 0.1 * np.sin(np.arange(1920)[None, None, :, None] / 1920.0 * 2 * np.pi)
-    depth += 0.05 * np.sin(
-        0.5 * np.arange(1080)[None, :, None, None] / 1080.0 * 2 * np.pi
-    )
+    depth += 0.05 * np.sin(0.5 * np.arange(1080)[None, :, None, None] / 1080.0 * 2 * np.pi)
 
     # intrinsics of realsense d415 for 1920x1080
     camera_matrix = np.array(
@@ -210,9 +263,7 @@ def test_pvn3d_ee_normals():
         ]
     ).astype(np.float32)
 
-    normal_map = (
-        PVN3D_E2E.compute_normal_map(depth, camera_matrix).numpy()[0].astype(np.float32)
-    )
+    normal_map = PVN3D_E2E.compute_normal_map(depth, camera_matrix).numpy()[0].astype(np.float32)
 
     img_depth = o3d.geometry.Image(depth[0])
     pinhole_camera_intrinsic = o3d.camera.PinholeCameraIntrinsic(

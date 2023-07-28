@@ -176,15 +176,17 @@ class _Blender(_Dataset):
         color_depth = lambda x: cv2.applyColorMap(
             cv2.convertScaleAbs(x, alpha=255 / 2), cv2.COLORMAP_JET
         )
+        x = example[0]
+        y = example[1]
 
-        rgb = example[0][0]
-        depth = example[0][1]
-        intrinsics = example[0][2].astype(np.float32)
-        bboxes = example[0][3]
-        kpts = example[0][4]
+        rgb = x[0]
+        depth = x[1]
+        intrinsics = x[2].astype(np.float32)
+        bboxes = x[3]
+        kpts = x[4]
 
-        RT = example[1][0]
-        mask = example[1][1]
+        RT = y[0]
+        mask = y[1]
 
         from losses.pvn_loss import PvnLoss
         from models.pvn3d_e2e import PVN3D_E2E

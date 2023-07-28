@@ -3,9 +3,6 @@ from millify import millify
 import tensorflow as tf
 import numpy as np
 import cv2
-from pathlib import Path
-import open3d as o3d
-import random
 
 import cvde
 from models.pvn3d_e2e import PVN3D_E2E
@@ -18,10 +15,9 @@ class TrainE2E(cvde.job.Job):
         job_cfg = self.config
 
         self.num_validate = job_cfg["num_validate"]
-        
+
         strategy = tf.distribute.get_strategy()
 
-        print("ACTIVE GPUS: ", tf.config.experimental.list_physical_devices("GPU"))
         print("Running job: ", self.name)
 
         with strategy.scope():
@@ -29,9 +25,8 @@ class TrainE2E(cvde.job.Job):
             self.model = model = PVN3D_E2E(**job_cfg["PVN3D_E2E"])
             train_set = TrainBlender(**job_cfg["TrainBlender"])
             val_set = ValBlender(**job_cfg["ValBlender"])
-        self.demo_set = ValBlender(**job_cfg["ValBlender"]).to_tf_dataset().take(self.num_validate)
+        self.demo_set = ValBlender(**job_cfg["ValBlender"])
 
-        self.color_seg = val_set.color_seg
         self.mesh_vertices = np.asarray(val_set.mesh.sample_points_poisson_disk(1000).points)
 
         self.loss_fn = loss_fn = PvnLoss(**job_cfg["PvnLoss"])
@@ -65,6 +60,7 @@ class TrainE2E(cvde.job.Job):
                         "loss": millify(loss_combined.numpy(), precision=4),
                     }
                 )
+                
             bar.close()
             for k, v in loss_vals.items():
                 loss_vals[k] = tf.reduce_mean(v)
@@ -80,6 +76,8 @@ class TrainE2E(cvde.job.Job):
                 l = loss_fn(y, pred)
                 for k, v in zip(["loss", "loss_cp", "loss_kp", "loss_seg"], l):
                     loss_vals[k] = loss_vals.get(k, []) + [v]
+                    
+                
 
             for k, v in loss_vals.items():
                 loss_vals[k] = tf.reduce_mean(v)
@@ -87,9 +85,12 @@ class TrainE2E(cvde.job.Job):
 
             self.log_visualization(epoch)
 
+            # save model
+            model.save(f"checkpoints/{self.name}/model_{epoch:02}", save_format="tf")
+
     def log_visualization(self, epoch: int, logs=None):
         i = 0
-        for x, y in self.demo_set:
+        for x, y in self.demo_set.to_tf_dataset().take(self.num_validate):
             (
                 b_rgb,
                 b_depth,
@@ -124,34 +125,14 @@ class TrainE2E(cvde.job.Job):
             b_kp_offset = b_kp_offset.numpy()
             b_cropped_rgb = b_cropped_rgb.numpy()
             b_cp_offset = b_cp_offset.numpy()
-            b_offsets = np.concatenate([b_kp_offset, b_cp_offset], axis=2)
-
-            b_kpts_gt = (
-                tf.matmul(b_mesh_kpts, tf.transpose(b_RT_gt[:, :3, :3], (0, 2, 1)))
-                + b_RT_gt[:, tf.newaxis, :3, 3]
-            )
-            b_kpts_gt = self.project_batch_to_image(b_kpts_gt, b_intrinsics)
-            b_kpts_pred = self.project_batch_to_image(b_kpts_pred, b_intrinsics)
-
             b_R = b_R.numpy()
             b_t = b_t.numpy()
             b_RT_gt = b_RT_gt.numpy()
             b_intrinsics = b_intrinsics.numpy()
             b_crop_factor = b_crop_factor.numpy()
 
-            # draw mesh
-            # create a batch of mesh_vertices
-            b_mesh_vertices = np.tile(self.mesh_vertices, (b_R.shape[0], 1, 1))
-            # transform mesh_vertices
-            b_mesh_vertices = (
-                np.matmul(b_mesh_vertices, b_R[:, :3, :3].transpose((0, 2, 1)))
-                + b_t[:, tf.newaxis, :]
-            )
-            b_mesh_vertices = self.project_batch_to_image(b_mesh_vertices, b_intrinsics)[
-                ..., :2
-            ].astype(np.int32)
-
             # get gt offsets
+            b_offsets_pred = np.concatenate([b_kp_offset, b_cp_offset], axis=2)
             b_mask_selected = tf.gather_nd(b_mask, b_sampled_inds)
             b_kp_offsets_gt, b_cp_offsets_gt = self.loss_fn.get_offst(
                 b_RT_gt,
@@ -160,6 +141,40 @@ class TrainE2E(cvde.job.Job):
                 b_mesh_kpts,
             )
             b_offsets_gt = np.concatenate([b_kp_offsets_gt, b_cp_offsets_gt], axis=2)
+
+            # keypoint vectors
+            b_kpts_vectors_pred = b_xyz[:, :, None, :].numpy() + b_offsets_pred  # [b, n_pts, 9, 3]
+            b_kpts_vectors_gt = b_xyz[:, :, None, :].numpy() + b_offsets_gt
+
+            # keypoints
+            b_kpts_gt = (
+                tf.matmul(b_mesh_kpts, tf.transpose(b_RT_gt[:, :3, :3], (0, 2, 1)))
+                + b_RT_gt[:, tf.newaxis, :3, 3]
+            )
+
+            # load mesh
+            b_mesh = np.tile(self.mesh_vertices, (b_R.shape[0], 1, 1))
+            # transform mesh_vertices
+            b_mesh_pred = (
+                np.matmul(b_mesh, b_R[:, :3, :3].transpose((0, 2, 1))) + b_t[:, tf.newaxis, :]
+            )
+            b_mesh_gt = (
+                np.matmul(b_mesh, b_RT_gt[:, :3, :3].transpose((0, 2, 1)))
+                + b_RT_gt[:, tf.newaxis, :3, 3]
+            )
+
+            b_mesh_pred = self.project_batch_to_image(b_mesh_pred, b_intrinsics)[..., :2].astype(
+                np.int32
+            )
+            b_mesh_gt = self.project_batch_to_image(b_mesh_gt, b_intrinsics)[..., :2].astype(
+                np.int32
+            )
+
+            b_kpts_gt = self.project_batch_to_image(b_kpts_gt, b_intrinsics)
+            b_kpts_pred = self.project_batch_to_image(b_kpts_pred, b_intrinsics)
+            b_kpts_vectors_gt = self.project_batch_to_image(b_kpts_vectors_gt, b_intrinsics)
+            b_kpts_vectors_pred = self.project_batch_to_image(b_kpts_vectors_pred, b_intrinsics)
+            b_xyz_projected = self.project_batch_to_image(b_xyz, b_intrinsics)  # [b, n_pts, 3]
 
             for (
                 rgb,
@@ -170,9 +185,13 @@ class TrainE2E(cvde.job.Job):
                 kpts_gt,
                 kpts_pred,
                 mesh_vertices,
-                offsets,
+                mesh_vertices_gt,
+                offsets_pred,
                 offsets_gt,
                 crop_factor,
+                kpts_vectors_pred,
+                kpts_vectors_gt,
+                xyz_projected,
             ) in zip(
                 b_rgb,
                 b_cropped_rgb,
@@ -181,17 +200,21 @@ class TrainE2E(cvde.job.Job):
                 b_sampled_inds,
                 b_kpts_gt,
                 b_kpts_pred,
-                b_mesh_vertices,
-                b_offsets,
+                b_mesh_pred,
+                b_mesh_gt,
+                b_offsets_pred,
                 b_offsets_gt,
                 b_crop_factor,
+                b_kpts_vectors_pred,
+                b_kpts_vectors_gt,
+                b_xyz_projected,
             ):
                 vis_seg = self.draw_segmentation(rgb.copy(), sampled_inds, seg_pred, roi)
                 self.tracker.log(f"RGB ({i})", vis_seg, index=epoch)
-                
-                self.tracker.log(f"RGB (crop) ({i})", crop_rgb.astype(np.uint8), index=epoch)
 
-                vis_mesh = self.draw_object_mesh(rgb.copy(), roi, mesh_vertices)
+                # self.tracker.log(f"RGB (crop) ({i})", crop_rgb.astype(np.uint8), index=epoch)
+
+                vis_mesh = self.draw_object_mesh(rgb.copy(), roi, mesh_vertices, mesh_vertices_gt)
                 self.tracker.log(f"RGB (mesh) ({i})", vis_mesh, index=epoch)
 
                 vis_kpts = self.draw_keypoint_correspondences(rgb.copy(), roi, kpts_gt, kpts_pred)
@@ -200,9 +223,9 @@ class TrainE2E(cvde.job.Job):
                 vis_offsets = self.draw_keypoint_offsets(
                     rgb.copy(),
                     roi,
-                    offsets,
+                    offsets_pred,
                     sampled_inds,
-                    kpts_gt,
+                    kpts_pred,
                     radius=int(crop_factor),
                 )
                 vis_offsets_gt = self.draw_keypoint_offsets(
@@ -216,6 +239,16 @@ class TrainE2E(cvde.job.Job):
                 # assemble images side-by-side
                 vis_offsets = np.concatenate([vis_offsets, vis_offsets_gt], axis=1)
                 self.tracker.log(f"RGB (offsets) ({i})", vis_offsets, index=epoch)
+
+                vis_vectors = self.draw_keypoint_vectors(
+                    rgb.copy(), roi, offsets_pred, kpts_pred, xyz_projected, kpts_vectors_pred
+                )
+                vis_vectors_gt = self.draw_keypoint_vectors(
+                    rgb.copy(), roi, offsets_gt, kpts_gt, xyz_projected, kpts_vectors_gt
+                )
+                # assemble images side-by-side
+                vis_vectors = np.concatenate([vis_vectors, vis_vectors_gt], axis=1)
+                self.tracker.log(f"RGB (vectors) ({i})", vis_vectors, index=epoch)
 
                 i = i + 1
                 if i >= self.num_validate:
@@ -251,12 +284,22 @@ class TrainE2E(cvde.job.Job):
             cv2.circle(rgb, (w_ind, h_ind), 1, color, -1)
         return rgb
 
-    def draw_object_mesh(self, rgb, roi, mesh_vertices):
+    def draw_object_mesh(self, rgb, roi, mesh_vertices, mesh_vertices_gt):
         h, w = rgb.shape[:2]
         clipped_mesh_vertices = np.clip(mesh_vertices, 0, [w - 1, h - 1])
+        clipped_mesh_vertices_gt = np.clip(mesh_vertices_gt, 0, [w - 1, h - 1])
+        rgb_pred = rgb.copy()
+        rgb_gt = rgb.copy()
         for x, y in clipped_mesh_vertices:
-            cv2.circle(rgb, (x, y), 1, (0, 0, 255), -1)
-        return self.crop_to_roi(rgb, roi)
+            cv2.circle(rgb_pred, (x, y), 1, (0, 0, 255), -1)
+        for x, y in clipped_mesh_vertices_gt:
+            cv2.circle(rgb_gt, (x, y), 1, (0, 255, 0), -1)
+
+        rgb_pred = self.crop_to_roi(rgb_pred, roi)
+        rgb_gt = self.crop_to_roi(rgb_gt, roi)
+        # assemble images side-by-side
+        vis_mesh = np.concatenate([rgb_pred, rgb_gt], axis=1)
+        return vis_mesh
 
     def draw_keypoint_correspondences(self, rgb, roi, kpts_gt, kpts_pred):
         # normalize z_coords of keypoints to [0, 1]
@@ -302,10 +345,17 @@ class TrainE2E(cvde.job.Job):
     def project_batch_to_image(self, pts, b_intrinsics):
         cam_cx, cam_cy = b_intrinsics[:, 0, 2], b_intrinsics[:, 1, 2]  # [b]
         cam_fx, cam_fy = b_intrinsics[:, 0, 0], b_intrinsics[:, 1, 1]  # [b]
-        coors = (
-            pts[..., :2] / pts[..., 2:] * tf.stack([cam_fx, cam_fy], axis=1)[:, tf.newaxis, :]
-            + tf.stack([cam_cx, cam_cy], axis=1)[:, tf.newaxis, :]
-        )
+
+        f = tf.stack([cam_fx, cam_fy], axis=1)  # [b, 2]
+        c = tf.stack([cam_cx, cam_cy], axis=1)  # [b, 2]
+    
+        rank = tf.rank(pts)
+        insert_n_dims = rank - 2
+        for _ in range(insert_n_dims):
+            f = tf.expand_dims(f, axis=1)
+            c = tf.expand_dims(c, axis=1)
+        
+        coors = pts[..., :2] / pts[..., 2:] * f + c
         coors = tf.floor(coors)
         return tf.concat([coors, pts[..., 2:]], axis=-1).numpy()
 
@@ -335,10 +385,54 @@ class TrainE2E(cvde.job.Job):
                     -1,
                 )
 
-            # # mark correct keypoint
+            # mark correct keypoint
             cv2.drawMarker(
                 offset_view,
                 (int(kpts_gt[i, 0]), int(kpts_gt[i, 1])),
+                (0, 255, 0),
+                markerType=cv2.MARKER_CROSS,
+                markerSize=20,
+                thickness=1,
+            )
+
+            offset_view = self.crop_to_roi(offset_view, roi, margin=10)
+            vis_offsets[
+                h * (i // 3) : h * (i // 3 + 1), w * (i % 3) : w * (i % 3 + 1)
+            ] = offset_view
+        return vis_offsets
+
+    def draw_keypoint_vectors(self, rgb, roi, offsets, kpts, xyz_projected, keypoints_from_pcd):
+        cropped_rgb = self.crop_to_roi(rgb, roi, margin=10)
+        h, w = cropped_rgb.shape[:2]
+        vis_offsets = np.zeros((h * 3, w * 3, 3), dtype=np.uint8).astype(np.uint8)
+
+        for i in range(9):
+            offset_view = np.zeros_like(rgb, dtype=np.uint8)
+
+            # get color hue from offset
+            hue = np.arctan2(offsets[:, i, 1], offsets[:, i, 0]) / np.pi
+            hue = (hue + 1) / 2
+            hue = (hue * 180).astype(np.uint8)
+            # value = np.ones_like(hue) * 255
+            value = (np.linalg.norm(offsets[:, i, :], axis=-1) / 0.1 * 255).astype(np.uint8)
+            hsv = np.stack([hue, np.ones_like(hue) * 255, value], axis=-1)
+            colors_offset = cv2.cvtColor(hsv[None], cv2.COLOR_HSV2RGB).astype(np.uint8)[0]
+
+            for start, target, color in zip(
+                xyz_projected, keypoints_from_pcd[:, i, :], colors_offset
+            ):
+                # over all pcd points
+                cv2.line(
+                    offset_view,
+                    tuple(map(int, start[:2])),
+                    tuple(map(int, target[:2])),
+                    tuple(map(int, color)),
+                    1,
+                )
+
+            cv2.drawMarker(
+                offset_view,
+                (int(kpts[i, 0]), int(kpts[i, 1])),
                 (0, 255, 0),
                 markerType=cv2.MARKER_CROSS,
                 markerSize=20,

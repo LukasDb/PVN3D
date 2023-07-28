@@ -8,3 +8,4 @@ log/
 .mypy_cache
 .cache/
 .local/
+checkpoints/**

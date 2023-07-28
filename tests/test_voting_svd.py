@@ -91,6 +91,7 @@ def test_batch_get_pt_candidates_tf():
                 [0.1, 0.1, 1.0],
             ]
         ]
+        * 2
     )  # [b, num_points, 3]
 
     # one keypoint is at first point (-0.1, -0.1, 1.)
@@ -138,6 +139,7 @@ def test_batch_get_pt_candidates_tf():
                 ],
             ]
         ]
+        * 2
     )  # [b, num_points, n_kpts, 3] n_pkts = 8
 
     # generate the same for the centerpoint
@@ -173,12 +175,12 @@ def test_batch_get_pt_candidates_tf():
                 ],
             ]
         ]
+        * 2
     )
 
     # [b, num_points, 1, 3]
-    seg_pre = np.ones([1, 9, 1])  # [b, num_points, 1]
-    k = 5
-
+    seg_pre = np.ones([2, 9, 1])  # [b, num_points, 1]
+    k = 5  # must be less than num_points, which is 9
     obj_kpts = batch_get_pt_candidates_tf(
         pcld_xyz.astype(np.float32),
         kpts_ofst_pre.astype(np.float32),
@@ -187,7 +189,7 @@ def test_batch_get_pt_candidates_tf():
         k,
     )
 
-    # we expect [1, 3, 9, 3] voted keypoints
+    # we expect [2, 3, 9, 3] voted keypoints
     expected_kpts = np.array(
         [  # batch
             [
@@ -196,6 +198,7 @@ def test_batch_get_pt_candidates_tf():
                 [[0.0, 0.0, 1.0]] * k,  # center for each point
             ]
         ]
+        * 2
     )
     assert_array_almost_equal(obj_kpts, expected_kpts)
 

@@ -48,8 +48,6 @@ def test_get_offst_centerpoint():
     pcld_xyz[:, 0] = [-0.5, 0.0, 0.5, -0.5, 0.0, 0.5, -0.5, 0.0, 0.5]
     pcld_xyz[:, 1] = [-0.5, -0.5, -0.5, 0.0, 0.0, 0.0, 0.5, 0.5, 0.5]
     pcld_xyz[:, 2] = 1.0  # [9,3]
-    print("Testing with pointcloud:\n", pcld_xyz)
-
     # mock mask_selected as all points in the pointcloud
     mask_selected = np.ones((9, 1)).astype(np.uint8)
 
@@ -67,18 +65,17 @@ def test_get_offst_centerpoint():
             [-0.5, -0.5, 0.0],
         ]
     )  # [9, 3]
-    offsets_cp_gt = offsets_cp_gt[None, :, None, :]  # [1, 9, 1, 3]
+    offsets_cp_gt = offsets_cp_gt[:, None, :]  # [9, 1, 3]
+    offsets_cp_gt = np.array([offsets_cp_gt, offsets_cp_gt])  # [2, 9, 1, 3]
 
     kp_off, cp_off = PvnLoss.get_offst(
-        RT[None, ...],
-        pcld_xyz[None, ...],
-        mask_selected[None, ...],
-        kpts_cpts[None, ...],
+        np.array([RT, RT]),
+        np.array([pcld_xyz, pcld_xyz]),
+        np.array([mask_selected, mask_selected]),
+        np.array([kpts_cpts, kpts_cpts]),
     )
     cp_off = cp_off.numpy()
-    print("Got cp_off:\n", cp_off)
-    print("Expected:\n", offsets_cp_gt)
-    assert_array_equal(cp_off.shape, (1, 9, 1, 3))
+    assert_array_equal(cp_off.shape, (2, 9, 1, 3))
     assert_array_almost_equal(cp_off, offsets_cp_gt)
 
 
@@ -90,7 +87,7 @@ def test_l1loss_zero_loss():
     offset_pred = np.random.uniform(size=(bs, n_pts, n_kpts, 3))
     offset_pred = tf.constant(offset_pred, dtype=tf.float32)
     offset_gt = tf.constant(offset_pred, dtype=tf.float32)
-    mask_labels = tf.ones((bs, n_pts), dtype=tf.int32)
+    mask_labels = tf.ones((bs, n_pts, 1), dtype=tf.int32)
     loss = PvnLoss.l1_loss(offset_pred, offset_gt, mask_labels)
     assert_array_almost_equal(loss, 0.0)
 
@@ -101,7 +98,7 @@ def test_l1loss_masked_zero_loss():
     n_pts = 10
     n_kpts = 8
     offset_pred = np.random.uniform(size=(bs, n_pts, n_kpts, 3))
-    mask_labels = np.ones((bs, n_pts))
+    mask_labels = np.ones((bs, n_pts, 1))
 
     # mask out 3 points and offset them (so they are "wrong")
     mask_labels[0, 0] = 0
@@ -128,13 +125,11 @@ def test_l1loss_set_loss():
     offset_pred = np.ones((bs, n_pts, n_kpts, 3))
     offset_gt = offset_pred.copy()
     offset_gt += error
-    mask_labels = np.ones((bs, n_pts))
+    mask_labels = np.ones((bs, n_pts, 1))
 
     offset_pred = tf.constant(offset_pred, dtype=tf.float32)
     offset_gt = tf.constant(offset_gt, dtype=tf.float32)
     mask_labels = tf.constant(mask_labels, dtype=tf.int32)
-    expected_l1_distance = (
-        error * n_kpts * 3
-    )  # summed manhattan distance over keypoints
+    expected_l1_distance = error * n_kpts * 3  # manhattan distance over keypoints
     loss = PvnLoss.l1_loss(offset_pred, offset_gt, mask_labels)
     assert_array_almost_equal(loss, expected_l1_distance)
