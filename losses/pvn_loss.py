@@ -21,13 +21,14 @@ class PvnLoss:
         self.BinaryFocalLoss = focal_loss.BinaryFocalLoss(gamma=2, from_logits=True)
         self.CategoricalCrossentropy = tf.keras.losses.CategoricalCrossentropy(from_logits=True)
 
-    def __call__(self, y_true, y_pred):
+    @tf.function
+    def call(self, y_true, y_pred):
         rt, mask = y_true[0], y_true[1]
 
         kp_pred, seg_pred, cp_pred = y_pred[0], y_pred[1], y_pred[2]
         xyz, sampled_inds, kpts_cpts = y_pred[3], y_pred[4], y_pred[5]
 
-        mask_selected = tf.gather_nd(mask, sampled_inds)
+        mask_selected = tf.gather_nd(mask, sampled_inds)  # [b, n_pts, 1]
 
         kp_gt, cp_gt = self.get_offst(
             rt,
@@ -35,9 +36,11 @@ class PvnLoss:
             mask_selected,
             kpts_cpts,
         )
-        
+
         loss_kp = self.l1_loss(offset_pred=kp_pred, offset_gt=kp_gt, mask_labels=mask_selected)
         loss_cp = self.l1_loss(offset_pred=cp_pred, offset_gt=cp_gt, mask_labels=mask_selected)
+        # loss_kp = tf.reduce_mean(tf.norm(kp_pred - kp_gt, axis=-1))
+        # loss_cp = tf.reduce_mean(tf.norm(cp_pred - cp_gt, axis=-1))
 
         if self.binary_loss:
             loss_seg = self.BinaryFocalLoss(mask_selected, seg_pred)
@@ -80,14 +83,17 @@ class PvnLoss:
             kp_offsets: (b,n_pts,n_kpts,3) Offsets to the keypoints
             cp_offsets: (b,n_pts,1,3) Offsets to the center point
         """
+        
+        
+        # WHICH ONE IS CORRECT!?????
         # transform kpts_cpts to camera frame using rt
         kpts_cpts_cam = (
             tf.matmul(kpts_cpts, tf.transpose(RT[:, :3, :3], (0, 2, 1))) + RT[:, tf.newaxis, :3, 3]
         )
 
         # calculate offsets to the pointcloud
-        kpts_cpts_cam = tf.expand_dims(kpts_cpts_cam, axis=1)  # [b, 1, 9, 3]
-        pcld_xyz = tf.expand_dims(pcld_xyz, axis=2)  # [b, n_pts, 1, 3]
+        kpts_cpts_cam = tf.expand_dims(kpts_cpts_cam, axis=1)  # [b, 1, 9, 3] # add num_pts dim
+        pcld_xyz = tf.expand_dims(pcld_xyz, axis=2)  # [b, n_pts, 1, 3] # add_kpts dim
         offsets = tf.subtract(kpts_cpts_cam, pcld_xyz)  # [b, n_pts, 9, 3]
         # mask offsets to the object points
         offsets = offsets * tf.cast(mask_selected[:, :, tf.newaxis], tf.float32)
@@ -110,16 +116,10 @@ class PvnLoss:
             loss: l1 loss
         """
 
-        n_kpts = tf.shape(offset_pred)[2]
-        num_nonzero = tf.cast(tf.math.count_nonzero(mask_labels), tf.float32)
+        diff = tf.math.abs(offset_pred - offset_gt)  # (b, n_pts, n_kpts, 3)
+        mask = tf.cast(mask_labels[:, :, tf.newaxis, :], tf.float32)  # (b, n_pts, 1, 3)
+        masked_diff = diff * mask
+        num_on_object = tf.math.reduce_sum(tf.cast(mask_labels, tf.float32))
+        loss = tf.reduce_sum(masked_diff) / (1e-5 + num_on_object)  # ()
 
-        w = tf.cast(mask_labels[:, :, tf.newaxis, :], tf.float32)  # [bs, n_pts, 1, 1]
-        w = tf.repeat(w, repeats=n_kpts, axis=2)  # [bs, n_pts, n_kpts, 1]
-
-        diff = tf.subtract(offset_pred, offset_gt)
-
-        abs_diff = tf.math.abs(diff) * w
-        in_loss = abs_diff
-        l1_loss = tf.reduce_sum(in_loss) / num_nonzero
-
-        return l1_loss
+        return loss

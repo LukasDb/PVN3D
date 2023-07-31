@@ -248,7 +248,7 @@ def test_pvn3d_ee_normals():
     # depth = np.random.uniform(size=(1, 1080, 1920, 1), low=0, high=5.0).astype(
     #     np.float32
     # )
-    depth = np.ones(shape=(1, 1080, 1920, 1), dtype=np.float32)
+    depth = np.ones(shape=(4, 1080, 1920, 1), dtype=np.float32)
     depth += 0.1 * np.sin(np.arange(1920)[None, None, :, None] / 1920.0 * 2 * np.pi)
     depth += 0.05 * np.sin(0.5 * np.arange(1080)[None, :, None, None] / 1080.0 * 2 * np.pi)
 
@@ -263,9 +263,9 @@ def test_pvn3d_ee_normals():
         ]
     ).astype(np.float32)
 
-    normal_map = PVN3D_E2E.compute_normal_map(depth, camera_matrix).numpy()[0].astype(np.float32)
+    normal_map = PVN3D_E2E.compute_normal_map(depth, camera_matrix).numpy()[3].astype(np.float32)
 
-    img_depth = o3d.geometry.Image(depth[0])
+    img_depth = o3d.geometry.Image(depth[3])
     pinhole_camera_intrinsic = o3d.camera.PinholeCameraIntrinsic(
         width=1920, height=1080, fx=1.0788e03, fy=1.0788e03, cx=9.6000e02, cy=5.4000e02
     )

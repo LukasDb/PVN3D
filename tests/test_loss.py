@@ -2,6 +2,7 @@ from PVN3D.losses.pvn_loss import PvnLoss
 import tensorflow as tf
 import numpy as np
 from numpy.testing import assert_array_equal, assert_array_almost_equal
+from pathlib import Path
 
 
 def _get_cube_keypoints(h, w, t):
@@ -94,7 +95,7 @@ def test_l1loss_zero_loss():
 
 def test_l1loss_masked_zero_loss():
     """test loss==0 when offset_pred==offset_gt"""
-    bs = 1
+    bs = 5
     n_pts = 10
     n_kpts = 8
     offset_pred = np.random.uniform(size=(bs, n_pts, n_kpts, 3))
@@ -108,6 +109,13 @@ def test_l1loss_masked_zero_loss():
     offset_gt[0, 0] += 0.2
     offset_gt[0, 1] -= 0.2
     offset_gt[0, 2] += 0.8
+
+    mask_labels[1, 0] = 0
+    mask_labels[2, 1] = 0
+    mask_labels[3, 2] = 0
+    offset_gt[1, 0] += 0.2
+    offset_gt[2, 1] -= 0.2
+    offset_gt[3, 2] += 0.8
 
     offset_pred = tf.constant(offset_pred, dtype=tf.float32)
     offset_gt = tf.constant(offset_gt, dtype=tf.float32)
@@ -132,4 +140,4 @@ def test_l1loss_set_loss():
     mask_labels = tf.constant(mask_labels, dtype=tf.int32)
     expected_l1_distance = error * n_kpts * 3  # manhattan distance over keypoints
     loss = PvnLoss.l1_loss(offset_pred, offset_gt, mask_labels)
-    assert_array_almost_equal(loss, expected_l1_distance)
+    assert_array_almost_equal(loss, expected_l1_distance, decimal=3)

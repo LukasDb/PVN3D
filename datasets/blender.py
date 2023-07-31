@@ -1,6 +1,8 @@
-import os
+from cvde.tf import Dataset as _Dataset
 
-# os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+import os
+import tensorflow as tf
+
 os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
 import numpy as np
 from PIL import Image
@@ -9,35 +11,14 @@ import json
 from scipy.spatial.transform import Rotation as R
 import pathlib
 import albumentations as A
-import tensorflow as tf
-from cvde.tf import Dataset as _Dataset
 import streamlit as st
-from functools import cached_property
 import itertools as it
 import open3d as o3d
 
+from .augment import add_background_depth, augment_depth, augment_rgb, rotate_datapoint
+
 
 class _Blender(_Dataset):
-    cls_dict = {
-        "cpsduck": 1,
-        "stapler": 2,
-        "cpsglue": 3,
-        "wrench_13": 4,
-        "chew_toy": 5,
-        "pliers": 6,
-        "all": 100,  # hacked to cpsduck for now
-    }
-    colormap = [
-        [0, 0, 0],
-        [255, 255, 0],
-        [0, 0, 255],
-        [240, 240, 240],
-        [0, 255, 0],
-        [255, 0, 50],
-        [0, 255, 255],
-    ]
-    labelmap = {v: k for k, v in cls_dict.items()}
-
     def __init__(
         self,
         *,
@@ -50,17 +31,38 @@ class _Blender(_Dataset):
         use_cache,
         root,
         train_split,
+        n_aug_per_image: int,
         cutoff=None,
     ):
+        super().__init__()
+        self.cls_dict = {
+            "cpsduck": 1,
+            "stapler": 2,
+            "cpsglue": 3,
+            "wrench_13": 4,
+            "chew_toy": 5,
+            "pliers": 6,
+            "all": 100,  # hacked to cpsduck for now
+        }
+        self.colormap = [
+            [0, 0, 0],
+            [255, 255, 0],
+            [0, 0, 255],
+            [240, 240, 240],
+            [0, 255, 0],
+            [255, 0, 50],
+            [0, 255, 255],
+        ]
+        self.labelmap = {v: k for k, v in self.cls_dict.items()}
         self.cls_type = cls_type
         self.cls_id = self.cls_dict[self.cls_type]
         self.current_cls_root = 0
         self.if_augment = if_augment
-        self._current = 0
         self.im_size = im_size
         self.batch_size = batch_size
         self.use_cache = use_cache
         self.is_train = is_train
+        self.n_aug_per_image = n_aug_per_image
 
         self.data_root = data_root = pathlib.Path(root) / data_name
 
@@ -70,6 +72,7 @@ class _Blender(_Dataset):
             self.roots_and_ids = self.get_roots_and_ids_for_cls_root(self.cls_root)
 
         else:
+            raise AssertionError("Not implemented yet.")
             self.all_cls_roots = [data_root / x for x in data_root.iterdir()]
             self.cls_root = self.all_cls_roots[0]
             all_roots_and_ids = [
@@ -105,6 +108,15 @@ class _Blender(_Dataset):
             ],
         )
 
+        mesh_kpts_path = self.kpts_root / self.cls_type
+        kpts = np.loadtxt(mesh_kpts_path / "farthest.txt")
+        center = [np.loadtxt(mesh_kpts_path / "center.txt")]
+        self.mesh_kpts = np.concatenate([kpts, center], axis=0)
+
+        mesh_path = self.data_root / "meshes" / (self.cls_type + ".ply")
+        mesh = o3d.io.read_triangle_mesh(str(mesh_path))
+        self.mesh_vertices = np.asarray(mesh.sample_points_poisson_disk(1000).points)
+
         print("Initialized Blender Dataset.")
         print(f"\tData name: {data_name}")
         print(f"\tTotal split # of images: {len(self.roots_and_ids)}")
@@ -114,51 +126,29 @@ class _Blender(_Dataset):
         print()
 
     def to_tf_dataset(self):
-        def generator():
-            for i in range(len(self.roots_and_ids)):
-                yield self[i]
-
-        tfdata = tf.data.Dataset.from_generator(
-            generator,
-            output_signature=(
-                (
-                    tf.TensorSpec(shape=(*self.im_size, 3), dtype=tf.uint8, name="rgb"),
-                    tf.TensorSpec(shape=(*self.im_size, 1), dtype=tf.float32, name="depth"),
-                    tf.TensorSpec(shape=(3, 3), dtype=tf.float32, name="intrinsics"),
-                    tf.TensorSpec(shape=(4,), dtype=tf.int32, name="roi"),
-                    tf.TensorSpec(shape=(9, 3), dtype=tf.float32, name="mesh_kpts"),
-                ),
-                (
-                    tf.TensorSpec(shape=(4, 4), dtype=tf.float32, name="RT"),
-                    tf.TensorSpec(shape=(*self.im_size, 1), dtype=tf.uint8, name="mask"),
-                ),
-            ),
-        )
         if self.use_cache:
-            # h = hash(str(self.cls_root)+str(self.cls_id)+self.cls_type+str(self.if_augment)+str(self.is_train))
-            h = "train" if self.is_train else "val"
-            h += "_" + self.cls_type
-            tfdata = tfdata.cache(str(self.data_root / f"cached_data_{h}"))
+            cache_name = "train" if self.is_train else "val"
+            cache_path = self.cls_root / f"cache_{cache_name}"
+            try:
+                tfds = self.from_cache(cache_path)
+            except FileNotFoundError:
+                self.cache(cache_path)
+                tfds = self.from_cache(cache_path)
 
-        tfdata = (
-            tfdata.batch(self.batch_size, drop_remainder=True)
-            .map(self.simple_add_depth_background, num_parallel_calls=tf.data.AUTOTUNE)
-            .prefetch(tf.data.AUTOTUNE)
-        )
-        return tfdata
+            def arrange_as_xy_tuple(d):
+                return (d["rgb"], d["depth"], d["intrinsics"], d["roi"], d["mesh_kpts"]), (
+                    d["RT"],
+                    d["mask"],
+                )
 
-    @staticmethod
-    @tf.function
-    def simple_add_depth_background(x, y):
-        rgb, depth, intrinsics, roi, mesh_kpts = x
-        RT, mask = y
-        depth = tf.where(
-            mask == 1,
-            depth,
-            tf.random.uniform(shape=depth.shape, minval=0.3, maxval=1.5),
-        )
-        depth = depth + tf.random.uniform(shape=depth.shape, minval=-0.02, maxval=0.02)
-        return (rgb, depth, intrinsics, roi, mesh_kpts), (RT, mask)
+            print("USING CACHE FROM ", cache_path)
+            return (
+                tfds.map(arrange_as_xy_tuple)
+                .batch(self.batch_size, drop_remainder=True)
+                .prefetch(tf.data.AUTOTUNE)
+            )
+
+        raise NotImplementedError
 
     def get_roots_and_ids_for_cls_root(self, cls_root: pathlib.Path):
         numeric_file_ids = (cls_root / "rgb").glob("*")
@@ -167,26 +157,21 @@ class _Blender(_Dataset):
         numeric_file_ids.sort()
         return [(cls_root, id) for id in numeric_file_ids]
 
-    def color_seg(self, data):
-        flattened = data.reshape((-1, 1)).astype(int)
-        out = np.array(self.colormap)[flattened].astype(np.uint8)
-        return out.reshape((*data.shape[:2], 3))
-
     def visualize_example(self, example):
         color_depth = lambda x: cv2.applyColorMap(
             cv2.convertScaleAbs(x, alpha=255 / 2), cv2.COLORMAP_JET
         )
-        x = example[0]
-        y = example[1]
+        
+        num_samples = st.select_slider("num_samples", [2**i for i in range(5, 13)])
+        
+        rgb = example["rgb"]
+        depth = example["depth"]
+        intrinsics = example["intrinsics"].astype(np.float32)
+        bboxes = example["roi"]
+        kpts = example["mesh_kpts"]
 
-        rgb = x[0]
-        depth = x[1]
-        intrinsics = x[2].astype(np.float32)
-        bboxes = x[3]
-        kpts = x[4]
-
-        RT = y[0]
-        mask = y[1]
+        RT = example["RT"]
+        mask = example["mask"]
 
         from losses.pvn_loss import PvnLoss
         from models.pvn3d_e2e import PVN3D_E2E
@@ -203,7 +188,7 @@ class _Blender(_Dataset):
             depth[None].astype(np.float32),
             intrinsics[None].astype(np.float32),
             _bbox,
-            4096,
+            num_samples,
         )
         mask_selected = tf.gather_nd(mask[None], inds)
         kp_offsets, cp_offsets = PvnLoss.get_offst(
@@ -237,10 +222,8 @@ class _Blender(_Dataset):
         projected_pcd = to_image(xyz)  # [b, n_pts, 3]
 
         for i in range(9):
-            offset_view = np.zeros_like(rgb, dtype=np.uint8)
-
-            # sort pcd from back to front
-            # inds = np.argsort(keypoints_from_pcd[0, :, i, 2])[::-1]
+            #offset_view = np.zeros_like(rgb, dtype=np.uint8)
+            offset_view = rgb.copy() // 2
 
             # get color hue from offset
             hue = np.arctan2(all_offsets[0, :, i, 1], all_offsets[0, :, i, 0]) / np.pi
@@ -250,15 +233,6 @@ class _Blender(_Dataset):
             value = (np.linalg.norm(all_offsets[0, :, i, :], axis=-1) / 0.1 * 255).astype(np.uint8)
             hsv = np.stack([hue, np.ones_like(hue) * 255, value], axis=-1)
             colored_offset = cv2.cvtColor(hsv[None], cv2.COLOR_HSV2RGB).astype(np.uint8)
-
-            # for point, color in zip(projected_pcd[0, :], colored_offset[0]):
-            #     cv2.circle(
-            #         offset_view,
-            #         tuple(map(int, point[:2])),
-            #         int(_crop_factor),
-            #         tuple(map(int, color)),
-            #         -1,
-            #     )
 
             sorted_inds = np.argsort(np.linalg.norm(all_offsets[0, :, i, :], axis=-1), axis=-1)[
                 ::-1
@@ -326,37 +300,47 @@ class _Blender(_Dataset):
         for col, (name, offset_view) in zip(cols, offset_views.items()):
             col.image(offset_view, caption=name)
 
-    def __next__(self):
-        data = self[self._current]
-        self._current += 1
-        return data
-
     def __len__(self):
-        return len(self.roots_and_ids) // self.batch_size
+        return len(self.roots_and_ids) * self.n_aug_per_image
 
-    def __getitem__(self, dataset_ind):
-        self.cls_root, i = self.roots_and_ids[dataset_ind]
+    def __getitem__(self, idx):
+        self.cls_root, i = self.roots_and_ids[idx // self.n_aug_per_image]
 
         rgb = self.get_rgb(i)
         mask = self.get_mask(i)
-        depth = np.array(self.get_depth(i))
-        bboxes = np.array(self.get_gt_bbox(i, mask=mask)[0])  # FOR SINGLE OBJECT
-        rt = np.array(self.get_RT_list(i)[0])  # FOR SINGLE OBJECT
-
+        depth = self.get_depth(i)
         mask = np.where(mask == self.cls_id, 1, 0).astype(np.uint8)
+        
+        rt_list = self.get_RT_list(i)  # FOR SINGLE OBJECT
 
-        # TODO augment depth
-
+        # 6IMPOSE data augmentation
         if self.if_augment:
-            res = self.rgbmask_augment(image=rgb, mask=mask)
-            rgb = np.array(res["image"])
-            mask = np.array(res["mask"])
+            obj_pos = rt_list[0][:3, 3] # FOR SINGLE OBJECT
 
-        out = (rgb, depth, self.intrinsic_matrix, bboxes[:4], self.mesh_kpts), (
-            rt,
-            mask,
-        )  # get rid of cls_id in bboxes
-        return out
+            depth = add_background_depth(
+                depth[tf.newaxis, :, :],
+                obj_pos=obj_pos,
+                camera_matrix=self.intrinsic_matrix.astype(np.float32),
+                rgb2noise=None,
+            )
+            depth = augment_depth(depth)[0, :, :, :].numpy()
+
+            rgb = augment_rgb(rgb.astype(np.float32) / 255.0) * 255
+            
+            rgb, mask, depth, rt_list = rotate_datapoint(img_likes=[rgb, mask, depth], Rt=rt_list)
+        
+        rt = rt_list[0]
+        bboxes = self.get_gt_bbox(i, mask=mask)[0]  # FOR SINGLE OBJECT
+
+        return {
+            "rgb": rgb.astype(np.uint8),
+            "depth": depth.astype(np.float32),
+            "intrinsics": self.intrinsic_matrix.astype(np.float32),
+            "roi": bboxes[:4].astype(np.int32),
+            "mesh_kpts": self.mesh_kpts.astype(np.float32),
+            "RT": rt.astype(np.float32),
+            "mask": mask.astype(np.uint8),
+        }
 
     def get_rgb(self, index):
         rgb_path = os.path.join(self.cls_root, "rgb", f"rgb_{index:04}.png")
@@ -372,24 +356,11 @@ class _Blender(_Dataset):
 
     def get_depth(self, index):
         depth_path = os.path.join(self.cls_root, "depth", f"depth_{index:04}.exr")
-        dpt = cv2.imread(depth_path, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
-        dpt = dpt[:, :, :1]
-        dpt_mask = dpt < 5  # in meters, we filter out the background( > 5m)
-        dpt = dpt * dpt_mask
-        return dpt
-
-    @cached_property
-    def mesh_kpts(self):
-        mesh_kpts_path = self.kpts_root / self.cls_type
-        kpts = np.loadtxt(mesh_kpts_path / "farthest.txt")
-        center = [np.loadtxt(mesh_kpts_path / "center.txt")]
-        kpts_cpts = np.concatenate([kpts, center], axis=0)
-        return kpts_cpts
-
-    @cached_property
-    def mesh(self) -> o3d.geometry.TriangleMesh:
-        mesh_path = self.data_root / "meshes" / (self.cls_type + ".ply")
-        return o3d.io.read_triangle_mesh(str(mesh_path))
+        depth = cv2.imread(depth_path, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
+        depth = depth[:, :, :1]
+        depth_mask = depth < 5  # in meters, we filter out the background( > 5m)
+        depth = depth * depth_mask
+        return depth
 
     def get_RT_list(self, index):
         """return a list of tuples of RT matrix and cls_id [(RT_0, cls_id_0), (RT_1,, cls_id_1) ..., (RT_N, cls_id_N)]"""
@@ -431,7 +402,7 @@ class _Blender(_Dataset):
                     Rt[:3, 3] = cam_rot.as_matrix().T @ (pos - cam_pos)
                     # RT_list.append((Rt, self.cls_id))
                     RT_list.append(Rt)
-        return RT_list
+        return np.array(RT_list)
 
     def get_gt_bbox(self, index, mask=None) -> np.ndarray:
         bboxes = []

@@ -16,36 +16,39 @@ class TrainE2E(cvde.job.Job):
 
         self.num_validate = job_cfg["num_validate"]
 
-        strategy = tf.distribute.get_strategy()
-
         print("Running job: ", self.name)
 
-        with strategy.scope():
-            # model: tf.keras.Model = load_model(job_cfg["Model"], **job_cfg)
-            self.model = model = PVN3D_E2E(**job_cfg["PVN3D_E2E"])
-            train_set = TrainBlender(**job_cfg["TrainBlender"])
-            val_set = ValBlender(**job_cfg["ValBlender"])
-        self.demo_set = ValBlender(**job_cfg["ValBlender"])
+        self.model = model = PVN3D_E2E(**job_cfg["PVN3D_E2E"])
+        train_set = TrainBlender(**job_cfg["TrainBlender"])
+        val_config = job_cfg["ValBlender"]
+        val_set = ValBlender(**val_config)
+        self.demo_set = ValBlender(**val_config)
 
-        self.mesh_vertices = np.asarray(val_set.mesh.sample_points_poisson_disk(1000).points)
+        self.mesh_vertices = val_set.mesh_vertices
 
         self.loss_fn = loss_fn = PvnLoss(**job_cfg["PvnLoss"])
         optimizer = tf.keras.optimizers.Adam(**job_cfg["Adam"])
 
+        #model.load_weights(f"checkpoints/{self.name}/model_00")
+
         self.log_visualization(-1)
 
         num_epochs = job_cfg["epochs"]
+        train_set_tf = train_set.to_tf_dataset()
+        val_set_tf = val_set.to_tf_dataset()
         for epoch in range(num_epochs):
-            bar = tqdm(total=len(train_set), desc=f"Train ({epoch}/{num_epochs})")
+            bar = tqdm(
+                total=len(train_set) // train_set.batch_size, desc=f"Train ({epoch}/{num_epochs})"
+            )
 
             loss_vals = {}
-            for x, y in train_set.to_tf_dataset():
+            for x, y in train_set_tf:
                 if self.is_stopped:
                     return
 
                 with tf.GradientTape() as tape:
                     pred = model(x, training=True)
-                    loss_combined, loss_cp, loss_kp, loss_seg = loss_fn(y, pred)
+                    loss_combined, loss_cp, loss_kp, loss_seg = loss_fn.call(y, pred)
                 gradients = tape.gradient(loss_combined, model.trainable_variables)
                 optimizer.apply_gradients(zip(gradients, model.trainable_variables))
 
@@ -60,33 +63,30 @@ class TrainE2E(cvde.job.Job):
                         "loss": millify(loss_combined.numpy(), precision=4),
                     }
                 )
-                
+
             bar.close()
+            model.save(f"checkpoints/{self.name}/model_{epoch:02}", save_format="tf")
+
             for k, v in loss_vals.items():
                 loss_vals[k] = tf.reduce_mean(v)
                 self.tracker.log(f"train_{k}", loss_vals[k], epoch)
 
+            self.log_visualization(epoch)
+
             loss_vals = {}
             for x, y in tqdm(
-                val_set.to_tf_dataset(),
+                val_set_tf,
                 desc=f"Val ({epoch}/{num_epochs})",
-                total=len(val_set),
+                total=len(val_set) // val_set.batch_size,
             ):
                 _, _, _, pred = model(x, training=False)
-                l = loss_fn(y, pred)
+                l = loss_fn.call(y, pred)
                 for k, v in zip(["loss", "loss_cp", "loss_kp", "loss_seg"], l):
                     loss_vals[k] = loss_vals.get(k, []) + [v]
-                    
-                
 
             for k, v in loss_vals.items():
                 loss_vals[k] = tf.reduce_mean(v)
                 self.tracker.log(f"val_{k}", loss_vals[k], epoch)
-
-            self.log_visualization(epoch)
-
-            # save model
-            model.save(f"checkpoints/{self.name}/model_{epoch:02}", save_format="tf")
 
     def log_visualization(self, epoch: int, logs=None):
         i = 0
@@ -348,13 +348,13 @@ class TrainE2E(cvde.job.Job):
 
         f = tf.stack([cam_fx, cam_fy], axis=1)  # [b, 2]
         c = tf.stack([cam_cx, cam_cy], axis=1)  # [b, 2]
-    
+
         rank = tf.rank(pts)
         insert_n_dims = rank - 2
         for _ in range(insert_n_dims):
             f = tf.expand_dims(f, axis=1)
             c = tf.expand_dims(c, axis=1)
-        
+
         coors = pts[..., :2] / pts[..., 2:] * f + c
         coors = tf.floor(coors)
         return tf.concat([coors, pts[..., 2:]], axis=-1).numpy()
@@ -365,7 +365,8 @@ class TrainE2E(cvde.job.Job):
         vis_offsets = np.zeros((h * 3, w * 3, 3), dtype=np.uint8).astype(np.uint8)
 
         for i in range(9):
-            offset_view = np.zeros_like(rgb, dtype=np.uint8)
+            #offset_view = np.zeros_like(rgb, dtype=np.uint8)
+            offset_view = rgb.copy() // 2
 
             # get color hue from offset
             hue = np.arctan2(offsets[:, i, 1], offsets[:, i, 0]) / np.pi
@@ -407,7 +408,8 @@ class TrainE2E(cvde.job.Job):
         vis_offsets = np.zeros((h * 3, w * 3, 3), dtype=np.uint8).astype(np.uint8)
 
         for i in range(9):
-            offset_view = np.zeros_like(rgb, dtype=np.uint8)
+            #offset_view = np.zeros_like(rgb, dtype=np.uint8)
+            offset_view = rgb.copy() // 2
 
             # get color hue from offset
             hue = np.arctan2(offsets[:, i, 1], offsets[:, i, 0]) / np.pi

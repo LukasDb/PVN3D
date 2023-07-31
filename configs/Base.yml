@@ -2,34 +2,36 @@ epochs: 20
 num_validate: 5
 
 Adam:
-  learning_rate: 0.001
+  learning_rate: 0.0001
 
 TrainBlender:
   batch_size: 32
-  root: "/media/lukas/G-RAID/datasets/blender"
+  root: "/home/lukas/data/blender/blender"
   data_name: cps
-  cls_type: stapler
+  cls_type: cpsduck
   train_split: 0.9
   #cutoff: 1000
   use_cache: True
   im_size:
     - 1080
     - 1920
+  n_aug_per_image: 16
 
 ValBlender: &val_config
   batch_size: 32
-  root: "/media/lukas/G-RAID/datasets/blender"
+  root: "/home/lukas/data/blender/blender"
   data_name: cps
-  cls_type: stapler
+  cls_type: cpsduck
   train_split: 0.9
   #cutoff: 1000
   use_cache: True
   im_size:
     - 1080
     - 1920
+  n_aug_per_image: 1
 
 PVN3D_E2E:
-  resnet_input_shape: [160, 160, 3] # in 6IMPOSE: 80x80
+  resnet_input_shape: [80, 80, 3] # in 6IMPOSE: 80x80
   n_point_candidates: 10
   num_kpts: 8
   num_cpts: 1
@@ -63,9 +65,9 @@ PVN3D_E2E:
     keep_prob: 0.5
     return_features: true
     use_tf_interpolation: true
-    n_sample_points: 2048
+    n_sample_points: 512
   dense_fusion_params:
-    num_embeddings  : 128
+    num_embeddings: 128
     conv1d_kernel: 1
     rgb_conv1d_dim: 256
     pcl_conv1d_dim: 256
@@ -86,4 +88,4 @@ PvnLoss:
   binary_loss: True
   kp_loss_discount: 1.0
   cp_loss_discount: 1.0
-  seg_loss_discount: 0.1
+  seg_loss_discount: 0.01

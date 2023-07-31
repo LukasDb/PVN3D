@@ -72,45 +72,38 @@ class PVN3D_E2E(_PVN3D):
     def compute_normal_map(depth, camera_matrix):
         kernel = tf.constant([[[[0.5, 0.5]], [[-0.5, 0.5]]], [[[0.5, -0.5]], [[-0.5, -0.5]]]])
 
-        diff = tf.nn.conv2d(depth, kernel, 1, "VALID")
+        diff = tf.nn.conv2d(depth, kernel, 1, "SAME")
 
-        fx, fy = camera_matrix[:, 0, 0], camera_matrix[:, 1, 1]
-        scale_depth = tf.concat(
-            [
-                depth / tf.reshape(fx, [-1, 1, 1, 1]),
-                depth / tf.reshape(fy, [-1, 1, 1, 1]),
-            ],
-            -1,
-        )
-
-        # clip=tf.constant(1)
-        # diff = tf.clip_by_value(diff, -clip, clip)
-        diff = diff / scale_depth[:, :-1, :-1, :]  # allow nan -> filter later
+        fx, fy = camera_matrix[:, 0, 0], camera_matrix[:, 1, 1]  # [b,]
+        f = tf.stack([fx, fy], axis=-1)[:, tf.newaxis, tf.newaxis, :]  # [b, 1, 1, 2]
+        
+        diff = diff * f / depth
 
         mask = tf.logical_and(~tf.math.is_nan(diff), tf.abs(diff) < 5)
 
         diff = tf.where(mask, diff, 0.0)
 
-        smooth = tf.constant(4)
-        kernel2 = tf.cast(tf.tile([[1 / tf.pow(smooth, 2)]], (smooth, smooth)), tf.float32)
-        kernel2 = tf.expand_dims(tf.expand_dims(kernel2, axis=-1), axis=-1)
-        kernel2 = kernel2 * tf.eye(2, batch_shape=(1, 1))
-        diff2 = tf.nn.conv2d(diff, kernel2, 1, "VALID")
+        # smooth = tf.constant(4)
+        # kernel2 = tf.cast(tf.tile([[1 / tf.pow(smooth, 2)]], (smooth, smooth)), tf.float32)
+        # kernel2 = tf.expand_dims(tf.expand_dims(kernel2, axis=-1), axis=-1)
+        # kernel2 = kernel2 * tf.eye(2, batch_shape=(1, 1))
+        # diff2 = tf.nn.conv2d(diff, kernel2, 1, "SAME")
 
-        mask_conv = tf.nn.conv2d(tf.cast(mask, tf.float32), kernel2, 1, "VALID")
+        # mask_conv = tf.nn.conv2d(tf.cast(mask, tf.float32), kernel2, 1, "SAME")
 
-        diff2 = diff2 / mask_conv
+        # diff2 = diff2 / mask_conv
+        diff2 = diff
 
-        ones = tf.expand_dims(tf.ones(tf.shape(diff2)[:3]), -1)
+        ones = tf.ones(tf.shape(diff2)[:3])[..., tf.newaxis]
         v_norm = tf.concat([diff2, ones], axis=-1)
 
         v_norm, _ = tf.linalg.normalize(v_norm, axis=-1)
         v_norm = tf.where(~tf.math.is_nan(v_norm), v_norm, [0])
 
-        v_norm = -tf.image.resize_with_crop_or_pad(
-            v_norm, tf.shape(depth)[1], tf.shape(depth)[2]
-        )  # pad and flip (towards cam)
-        return v_norm
+        # v_norm = -tf.image.resize_with_crop_or_pad(
+        #    v_norm, tf.shape(depth)[1], tf.shape(depth)[2]
+        # )  # pad and flip (towards cam)
+        return -v_norm
 
     @staticmethod
     def pcld_processor_tf(rgb, depth, camera_matrix, roi, num_sample_points, depth_trunc=2.0):
@@ -141,24 +134,26 @@ class PVN3D_E2E(_PVN3D):
         x_map, y_map = tf.meshgrid(
             tf.range(w_depth, dtype=tf.int32), tf.range(h_depth, dtype=tf.int32)
         )
+        y1 = y1[:, tf.newaxis, tf.newaxis]  # add, h, w dims
+        x1 = x1[:, tf.newaxis, tf.newaxis]
+        y2 = y2[:, tf.newaxis, tf.newaxis]
+        x2 = x2[:, tf.newaxis, tf.newaxis]
 
         # invalidate outside of roi
         in_y = tf.logical_and(
-            y_map[tf.newaxis, :, :] >= y1[:, tf.newaxis, tf.newaxis],
-            y_map[tf.newaxis, :, :] < y2[:, tf.newaxis, tf.newaxis],
+            y_map[tf.newaxis, :, :] >= y1,
+            y_map[tf.newaxis, :, :] < y2,
         )
         in_x = tf.logical_and(
-            x_map[tf.newaxis, :, :] >= x1[:, tf.newaxis, tf.newaxis],
-            x_map[tf.newaxis, :, :] < x2[:, tf.newaxis, tf.newaxis],
+            x_map[tf.newaxis, :, :] >= x1,
+            x_map[tf.newaxis, :, :] < x2,
         )
         in_roi = tf.logical_and(in_y, in_x)
 
         # get masked indices (valid truncated depth inside of roi)
-        is_valid_depth = tf.logical_and(depth[..., 0] > 1e-6, depth[..., 0] < depth_trunc)
-        inds = tf.where(
-            tf.logical_and(in_roi, is_valid_depth)
-        )  # [None, 3], last dimension is [batch_index, y_index, x_index]
-        inds = tf.cast(inds, tf.int32)
+        is_valid = tf.logical_and(depth[..., 0] > 1e-6, depth[..., 0] < depth_trunc)
+        inds = tf.where(tf.logical_and(in_roi, is_valid))
+        inds = tf.cast(inds, tf.int32)  # [None, 3]
 
         inds = tf.random.shuffle(inds)
 
@@ -252,7 +247,7 @@ class PVN3D_E2E(_PVN3D):
     ):
         """Transforms indices from full image to croppend and rescaled images.
         Original indices [b, h, w, 3] with the last dimensions as indices into [b, h, w]
-        are transformed and have same shape [b,h,w,3], however the indices now index 
+        are transformed and have same shape [b,h,w,3], however the indices now index
         into the cropped and rescaled images according to the bbox and crop_factor
 
         To be used with tf.gather_nd
@@ -305,9 +300,9 @@ class PVN3D_E2E(_PVN3D):
         ) = inputs  # rgb [b,h,w,3], depth: [b,h,w,1], intrinsics: [b, 3,3], roi: [b,4]
         h, w = tf.shape(full_rgb)[1], tf.shape(full_rgb)[2]
 
-        if training:
-            # inject noise to the roi
-            roi = roi + tf.random.uniform(tf.shape(roi), -20, 20, dtype=tf.int32)
+        # if training:
+        # inject noise to the roi
+        # roi = roi + tf.random.uniform(tf.shape(roi), -20, 20, dtype=tf.int32)
 
         # crop the image to the aspect ratio for resnet and integer crop factor
         bbox, crop_factor = self.get_crop_index(
@@ -328,11 +323,17 @@ class PVN3D_E2E(_PVN3D):
 
         norm_bbox = tf.cast(bbox / [h, w, h, w], tf.float32)  # normalize bounding box
         cropped_rgbs = tf.image.crop_and_resize(
-            full_rgb,
+            tf.cast(full_rgb, tf.float32),
             norm_bbox,
             tf.range(tf.shape(full_rgb)[0]),
             self.resnet_input_shape[:2],
         )
+        
+        # stop gradients for preprocessing        
+        cropped_rgbs = tf.stop_gradient(cropped_rgbs)
+        xyz = tf.stop_gradient(xyz)
+        feats = tf.stop_gradient(feats)
+        sampled_inds_in_roi = tf.stop_gradient(sampled_inds_in_roi)
 
         pcld_emb = self.pointnet2_model((xyz, feats), training=training)
         resnet_feats = self.resnet_model(cropped_rgbs, training=training)
@@ -341,7 +342,9 @@ class PVN3D_E2E(_PVN3D):
         feats_fused = self.dense_fusion_model([rgb_emb, pcld_emb], training=training)
         kp, seg, cp = self.mlp_model(feats_fused, training=training)
 
-        if not training:
+        if training:
+            return kp, seg, cp, xyz, sampled_inds_in_original_image, mesh_kpts, cropped_rgbs
+        else:
             batch_R, batch_t, voted_kpts = self.initial_pose_model([xyz, kp, cp, seg, mesh_kpts])
             return (
                 batch_R,
@@ -350,4 +353,3 @@ class PVN3D_E2E(_PVN3D):
                 (kp, seg, cp, xyz, sampled_inds_in_original_image, mesh_kpts, cropped_rgbs),
             )
 
-        return kp, seg, cp, xyz, sampled_inds_in_original_image, mesh_kpts, cropped_rgbs
