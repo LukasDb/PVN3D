@@ -50,11 +50,11 @@ class PvnLoss:
                 label, seg_pred
             )  # labels [bs, n_pts, n_cls] this is from logits
 
-        loss_cp = self.cp_loss_discount * loss_cp
-        loss_kp = self.kp_loss_discount * loss_kp
-        loss_seg = self.seg_loss_discount * loss_seg
+        _loss_cp = self.cp_loss_discount * loss_cp
+        _loss_kp = self.kp_loss_discount * loss_kp
+        _loss_seg = self.seg_loss_discount * loss_seg
 
-        loss = loss_cp + loss_kp + loss_seg
+        loss = _loss_cp + _loss_kp + _loss_seg
 
         return loss, loss_cp, loss_kp, loss_seg
 
@@ -115,11 +115,10 @@ class PvnLoss:
         Returns:
             loss: l1 loss
         """
-
         diff = tf.math.abs(offset_pred - offset_gt)  # (b, n_pts, n_kpts, 3)
         mask = tf.cast(mask_labels[:, :, tf.newaxis, :], tf.float32)  # (b, n_pts, 1, 3)
         masked_diff = diff * mask
         num_on_object = tf.math.reduce_sum(tf.cast(mask_labels, tf.float32))
-        loss = tf.reduce_sum(masked_diff) / (1e-5 + num_on_object)  # ()
+        loss = tf.reduce_sum(masked_diff) / (1e-5 + num_on_object)
 
         return loss

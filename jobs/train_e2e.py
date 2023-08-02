@@ -23,14 +23,14 @@ class TrainE2E(cvde.job.Job):
         val_config = job_cfg["ValBlender"]
         val_set = ValBlender(**val_config)
         self.demo_set = ValBlender(**val_config)
+        self.demo_set_tf = self.demo_set.to_tf_dataset().take(self.num_validate)
 
         self.mesh_vertices = val_set.mesh_vertices
 
         self.loss_fn = loss_fn = PvnLoss(**job_cfg["PvnLoss"])
         optimizer = tf.keras.optimizers.Adam(**job_cfg["Adam"])
 
-        #model.load_weights(f"checkpoints/{self.name}/model_00")
-
+    
         self.log_visualization(-1)
 
         num_epochs = job_cfg["epochs"]
@@ -38,7 +38,8 @@ class TrainE2E(cvde.job.Job):
         val_set_tf = val_set.to_tf_dataset()
         for epoch in range(num_epochs):
             bar = tqdm(
-                total=len(train_set) // train_set.batch_size, desc=f"Train ({epoch}/{num_epochs})"
+                total=len(train_set) // train_set.batch_size,
+                desc=f"Train ({epoch}/{num_epochs-1})",
             )
 
             loss_vals = {}
@@ -76,7 +77,7 @@ class TrainE2E(cvde.job.Job):
             loss_vals = {}
             for x, y in tqdm(
                 val_set_tf,
-                desc=f"Val ({epoch}/{num_epochs})",
+                desc=f"Val ({epoch}/{num_epochs-1})",
                 total=len(val_set) // val_set.batch_size,
             ):
                 _, _, _, pred = model(x, training=False)
@@ -90,7 +91,7 @@ class TrainE2E(cvde.job.Job):
 
     def log_visualization(self, epoch: int, logs=None):
         i = 0
-        for x, y in self.demo_set.to_tf_dataset().take(self.num_validate):
+        for x, y in self.demo_set_tf:
             (
                 b_rgb,
                 b_depth,
@@ -226,6 +227,7 @@ class TrainE2E(cvde.job.Job):
                     offsets_pred,
                     sampled_inds,
                     kpts_pred,
+                    seg=seg_pred,
                     radius=int(crop_factor),
                 )
                 vis_offsets_gt = self.draw_keypoint_offsets(
@@ -241,7 +243,13 @@ class TrainE2E(cvde.job.Job):
                 self.tracker.log(f"RGB (offsets) ({i})", vis_offsets, index=epoch)
 
                 vis_vectors = self.draw_keypoint_vectors(
-                    rgb.copy(), roi, offsets_pred, kpts_pred, xyz_projected, kpts_vectors_pred
+                    rgb.copy(),
+                    roi,
+                    offsets_pred,
+                    kpts_pred,
+                    xyz_projected,
+                    kpts_vectors_pred,
+                    seg=seg_pred,
                 )
                 vis_vectors_gt = self.draw_keypoint_vectors(
                     rgb.copy(), roi, offsets_gt, kpts_gt, xyz_projected, kpts_vectors_gt
@@ -359,14 +367,17 @@ class TrainE2E(cvde.job.Job):
         coors = tf.floor(coors)
         return tf.concat([coors, pts[..., 2:]], axis=-1).numpy()
 
-    def draw_keypoint_offsets(self, rgb, roi, offsets, sampled_inds, kpts_gt, radius=1):
+    def draw_keypoint_offsets(self, rgb, roi, offsets, sampled_inds, kpts_gt, radius=1, seg=None):
         cropped_rgb = self.crop_to_roi(rgb, roi, margin=10)
         h, w = cropped_rgb.shape[:2]
         vis_offsets = np.zeros((h * 3, w * 3, 3), dtype=np.uint8).astype(np.uint8)
 
+        if seg is None:
+            seg = [None] * len(sampled_inds)
+
         for i in range(9):
-            #offset_view = np.zeros_like(rgb, dtype=np.uint8)
-            offset_view = rgb.copy() // 2
+            # offset_view = np.zeros_like(rgb, dtype=np.uint8)
+            offset_view = rgb.copy() // 3
 
             # get color hue from offset
             hue = np.arctan2(offsets[:, i, 1], offsets[:, i, 0]) / np.pi
@@ -377,14 +388,15 @@ class TrainE2E(cvde.job.Job):
             hsv = np.stack([hue, np.ones_like(hue) * 255, value], axis=-1)
             colors_offset = cv2.cvtColor(hsv[None], cv2.COLOR_HSV2RGB).astype(np.uint8)[0]
 
-            for (_, h_ind, w_ind), color in zip(sampled_inds, colors_offset):
-                cv2.circle(
-                    offset_view,
-                    (w_ind, h_ind),
-                    radius,
-                    tuple(map(int, color)),
-                    -1,
-                )
+            for (_, h_ind, w_ind), color, seg_ in zip(sampled_inds, colors_offset, seg):
+                if seg_ is None or seg_ > 0.5:
+                    cv2.circle(
+                        offset_view,
+                        (w_ind, h_ind),
+                        radius,
+                        tuple(map(int, color)),
+                        -1,
+                    )
 
             # mark correct keypoint
             cv2.drawMarker(
@@ -402,14 +414,19 @@ class TrainE2E(cvde.job.Job):
             ] = offset_view
         return vis_offsets
 
-    def draw_keypoint_vectors(self, rgb, roi, offsets, kpts, xyz_projected, keypoints_from_pcd):
+    def draw_keypoint_vectors(
+        self, rgb, roi, offsets, kpts, xyz_projected, keypoints_from_pcd, seg=None
+    ):
         cropped_rgb = self.crop_to_roi(rgb, roi, margin=10)
         h, w = cropped_rgb.shape[:2]
         vis_offsets = np.zeros((h * 3, w * 3, 3), dtype=np.uint8).astype(np.uint8)
 
+        if seg is None:
+            seg = [None] * len(xyz_projected)
+
         for i in range(9):
-            #offset_view = np.zeros_like(rgb, dtype=np.uint8)
-            offset_view = rgb.copy() // 2
+            # offset_view = np.zeros_like(rgb, dtype=np.uint8)
+            offset_view = rgb.copy() // 3
 
             # get color hue from offset
             hue = np.arctan2(offsets[:, i, 1], offsets[:, i, 0]) / np.pi
@@ -420,17 +437,18 @@ class TrainE2E(cvde.job.Job):
             hsv = np.stack([hue, np.ones_like(hue) * 255, value], axis=-1)
             colors_offset = cv2.cvtColor(hsv[None], cv2.COLOR_HSV2RGB).astype(np.uint8)[0]
 
-            for start, target, color in zip(
-                xyz_projected, keypoints_from_pcd[:, i, :], colors_offset
+            for start, target, color, seg_ in zip(
+                xyz_projected, keypoints_from_pcd[:, i, :], colors_offset, seg
             ):
                 # over all pcd points
-                cv2.line(
-                    offset_view,
-                    tuple(map(int, start[:2])),
-                    tuple(map(int, target[:2])),
-                    tuple(map(int, color)),
-                    1,
-                )
+                if seg_ is None or seg_ > 0.5:
+                    cv2.line(
+                        offset_view,
+                        tuple(map(int, start[:2])),
+                        tuple(map(int, target[:2])),
+                        tuple(map(int, color)),
+                        1,
+                    )
 
             cv2.drawMarker(
                 offset_view,

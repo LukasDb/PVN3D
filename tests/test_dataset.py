@@ -6,12 +6,12 @@ from numpy.testing import assert_array_equal
 
 train_config = {
     "batch_size": 32,
-    "root": "/media/lukas/G-RAID/datasets/blender",
+    "root": "/home/lukas/data/blender/blender",
     "data_name": "cps",
     "cls_type": "cpsduck",
     "train_split": 0.9,
     # cutoff: 1000
-    "use_cache": True,
+    "use_cache": False,
     "im_size": [1080, 1920],
 }
 dataset = TrainBlender(**train_config)

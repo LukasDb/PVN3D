@@ -14,6 +14,7 @@ import albumentations as A
 import streamlit as st
 import itertools as it
 import open3d as o3d
+import typing
 
 from .augment import add_background_depth, augment_depth, augment_rgb, rotate_datapoint
 
@@ -151,9 +152,9 @@ class _Blender(_Dataset):
         raise NotImplementedError
 
     def get_roots_and_ids_for_cls_root(self, cls_root: pathlib.Path):
-        numeric_file_ids = (cls_root / "rgb").glob("*")
-        numeric_file_ids = [x for x in numeric_file_ids if "_R" not in str(x)]
-        numeric_file_ids = list([int(x.stem.split("_")[1]) for x in numeric_file_ids])
+        all_files = (cls_root / "rgb").glob("*")
+        files = [x for x in all_files if "_R" not in str(x)]
+        numeric_file_ids = list([int(x.stem.split("_")[1]) for x in files])
         numeric_file_ids.sort()
         return [(cls_root, id) for id in numeric_file_ids]
 
@@ -161,9 +162,9 @@ class _Blender(_Dataset):
         color_depth = lambda x: cv2.applyColorMap(
             cv2.convertScaleAbs(x, alpha=255 / 2), cv2.COLORMAP_JET
         )
-        
+
         num_samples = st.select_slider("num_samples", [2**i for i in range(5, 13)])
-        
+
         rgb = example["rgb"]
         depth = example["depth"]
         intrinsics = example["intrinsics"].astype(np.float32)
@@ -222,7 +223,7 @@ class _Blender(_Dataset):
         projected_pcd = to_image(xyz)  # [b, n_pts, 3]
 
         for i in range(9):
-            #offset_view = np.zeros_like(rgb, dtype=np.uint8)
+            # offset_view = np.zeros_like(rgb, dtype=np.uint8)
             offset_view = rgb.copy() // 2
 
             # get color hue from offset
@@ -304,33 +305,39 @@ class _Blender(_Dataset):
         return len(self.roots_and_ids) * self.n_aug_per_image
 
     def __getitem__(self, idx):
-        self.cls_root, i = self.roots_and_ids[idx // self.n_aug_per_image]
+        # this cycles n_aug_per_image times through the dataset
+        self.cls_root, i = self.roots_and_ids[idx % len(self.roots_and_ids)]
 
         rgb = self.get_rgb(i)
         mask = self.get_mask(i)
         depth = self.get_depth(i)
-        mask = np.where(mask == self.cls_id, 1, 0).astype(np.uint8)
-        
+
         rt_list = self.get_RT_list(i)  # FOR SINGLE OBJECT
+
+        # always add depth background
+        obj_pos = rt_list[0][:3, 3]  # FOR SINGLE OBJECT
+        depth = add_background_depth(
+            depth[tf.newaxis, :, :],
+            obj_pos=obj_pos,
+            camera_matrix=self.intrinsic_matrix.astype(np.float32),
+            rgb2noise=None,
+        )[
+            0
+        ].numpy()  # add and remove batch
 
         # 6IMPOSE data augmentation
         if self.if_augment:
-            obj_pos = rt_list[0][:3, 3] # FOR SINGLE OBJECT
-
-            depth = add_background_depth(
-                depth[tf.newaxis, :, :],
-                obj_pos=obj_pos,
-                camera_matrix=self.intrinsic_matrix.astype(np.float32),
-                rgb2noise=None,
-            )
-            depth = augment_depth(depth)[0, :, :, :].numpy()
-
+            depth = augment_depth(depth[tf.newaxis])[0].numpy()
             rgb = augment_rgb(rgb.astype(np.float32) / 255.0) * 255
-            
             rgb, mask, depth, rt_list = rotate_datapoint(img_likes=[rgb, mask, depth], Rt=rt_list)
-        
+
         rt = rt_list[0]
-        bboxes = self.get_gt_bbox(i, mask=mask)[0]  # FOR SINGLE OBJECT
+        bboxes = self.get_gt_bbox(i, mask=mask)  # FOR SINGLE OBJECT
+        if bboxes is None:
+            # create a bbox in the top left corner as negative example
+            bboxes = np.array([[0, 0, 200, 200]])
+        bboxes = bboxes[0]
+        mask = np.where(mask == self.cls_id, 1, 0).astype(np.uint8)  # FOR SINGLE OBJECT
 
         return {
             "rgb": rgb.astype(np.uint8),
@@ -404,7 +411,7 @@ class _Blender(_Dataset):
                     RT_list.append(Rt)
         return np.array(RT_list)
 
-    def get_gt_bbox(self, index, mask=None) -> np.ndarray:
+    def get_gt_bbox(self, index, mask=None) -> typing.Union[np.ndarray, None]:
         bboxes = []
         if mask is None:
             mask = self.get_mask(index)
@@ -418,6 +425,8 @@ class _Blender(_Dataset):
                 bboxes.append(bbox)
         else:
             bbox = self.get_bbox_from_mask(mask, gt_mask_value=self.cls_id)
+            if bbox is None:
+                return None
             bbox = list(bbox)
             bbox.append(self.cls_id)
             bboxes.append(bbox)

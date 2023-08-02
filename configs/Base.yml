@@ -1,4 +1,4 @@
-epochs: 20
+epochs: 50
 num_validate: 5
 
 Adam:
@@ -8,20 +8,20 @@ TrainBlender:
   batch_size: 32
   root: "/home/lukas/data/blender/blender"
   data_name: cps
-  cls_type: cpsduck
+  cls_type: stapler
   train_split: 0.9
   #cutoff: 1000
   use_cache: True
   im_size:
     - 1080
     - 1920
-  n_aug_per_image: 16
+  n_aug_per_image: 4
 
 ValBlender: &val_config
   batch_size: 32
   root: "/home/lukas/data/blender/blender"
   data_name: cps
-  cls_type: cpsduck
+  cls_type: stapler
   train_split: 0.9
   #cutoff: 1000
   use_cache: True
@@ -31,7 +31,7 @@ ValBlender: &val_config
   n_aug_per_image: 1
 
 PVN3D_E2E:
-  resnet_input_shape: [80, 80, 3] # in 6IMPOSE: 80x80
+  resnet_input_shape: [80, 80, 3]
   n_point_candidates: 10
   num_kpts: 8
   num_cpts: 1
@@ -64,7 +64,8 @@ PVN3D_E2E:
     is_train: true
     keep_prob: 0.5
     return_features: true
-    use_tf_interpolation: true
+    use_tf_interpolation: false
+    use_tfx: true # exclusively tensorflow
     n_sample_points: 512
   dense_fusion_params:
     num_embeddings: 128

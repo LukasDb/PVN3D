@@ -77,13 +77,9 @@ def three_interpolate(feats_source, idx, weights):
     :param weights: inverse distance weights (the farther the less important)
     :return: interpolated features bs, n_pts_target
     """
-    weights_sum = (
-        tf.reduce_sum(weights, axis=-1, keepdims=True) + 1e-6
-    )  # bs, n_pts_target, 1
+    weights_sum = tf.reduce_sum(weights, axis=-1, keepdims=True) + 1e-6  # bs, n_pts_target, 1
     weights_expand = tf.expand_dims(weights, axis=-1)  # bs, n_pts_target, 3, 1
-    feats_selected = tf.gather(
-        feats_source, indices=idx, batch_dims=1
-    )  # bs, n_pts_target, 3, c
+    feats_selected = tf.gather(feats_source, indices=idx, batch_dims=1)  # bs, n_pts_target, 3, c
     inter_feats = (
         tf.reduce_sum(weights_expand * feats_selected, axis=2) / weights_sum
     )  # bs, n_pts_target, c
@@ -97,12 +93,13 @@ class PointNet2Params:
     keep_prob: float
     return_features: bool
     use_tf_interpolation: bool
+    use_tfx: bool
     n_sample_points: int
 
 
 class _PointNet2TfModel(tf.keras.Model):
     def __init__(self, params: PointNet2Params, num_classes):
-        super().__init__(name = "PointNet2")
+        super().__init__(name="PointNet2")
         self.params = params
         self.activation = tf.nn.relu
         self.keep_prob = self.params.keep_prob
@@ -162,9 +159,7 @@ class _PointNet2TfModel(tf.keras.Model):
 
         self.fp_3 = Pointnet_FP(mlp=[256, 128], activation=self.activation, bn=self.bn)
 
-        self.fp_4 = Pointnet_FP(
-            mlp=[128, 128, 128], activation=self.activation, bn=self.bn
-        )
+        self.fp_4 = Pointnet_FP(mlp=[128, 128, 128], activation=self.activation, bn=self.bn)
 
         self.conv1d = Conv1D(filters=self.num_classes, kernel_size=1, activation=None)
 
@@ -202,9 +197,7 @@ class Pointnet_FP(Layer):
 
     def build(self, input_shape):
         for i, n_filters in enumerate(self.mlp):
-            self.mlp_list.append(
-                SharedMlP(n_filters, activation=self.activation, bn=self.bn)
-            )
+            self.mlp_list.append(SharedMlP(n_filters, activation=self.activation, bn=self.bn))
         super(Pointnet_FP, self).build(input_shape)
 
     def call(self, xyz_target, xyz_source, feats_target, feats_source, training=True):
@@ -263,9 +256,7 @@ class SharedMlP(Layer):
         super(SharedMlP, self).build(input_shape)
 
     def call(self, inputs, training=True):
-        points = tf.nn.conv2d(
-            inputs, filters=self.w, strides=self.strides, padding=self.padding
-        )
+        points = tf.nn.conv2d(inputs, filters=self.w, strides=self.strides, padding=self.padding)
 
         if self.bn:
             points = self.bn_layer(points, training=training)
