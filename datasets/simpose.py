@@ -14,12 +14,12 @@ import albumentations as A
 import streamlit as st
 import itertools as it
 import open3d as o3d
-import typing
+from typing import Dict
 
 from .augment import add_background_depth, augment_depth, augment_rgb, rotate_datapoint
 
 
-class _Blender(_Dataset):
+class _6IMPOSE(_Dataset):
     def __init__(
         self,
         *,
@@ -27,7 +27,6 @@ class _Blender(_Dataset):
         if_augment,
         is_train,
         cls_type,
-        im_size,
         batch_size,
         use_cache,
         root,
@@ -36,15 +35,6 @@ class _Blender(_Dataset):
         cutoff=None,
     ):
         super().__init__()
-        self.cls_dict = {
-            "cpsduck": 1,
-            "stapler": 2,
-            "cpsglue": 3,
-            "wrench_13": 4,
-            "chew_toy": 5,
-            "pliers": 6,
-            "all": 100,  # hacked to cpsduck for now
-        }
         self.colormap = [
             [0, 0, 0],
             [255, 255, 0],
@@ -54,12 +44,8 @@ class _Blender(_Dataset):
             [255, 0, 50],
             [0, 255, 255],
         ]
-        self.labelmap = {v: k for k, v in self.cls_dict.items()}
         self.cls_type = cls_type
-        self.cls_id = self.cls_dict[self.cls_type]
-        self.current_cls_root = 0
         self.if_augment = if_augment
-        self.im_size = im_size
         self.batch_size = batch_size
         self.use_cache = use_cache
         self.is_train = is_train
@@ -68,60 +54,37 @@ class _Blender(_Dataset):
         self.data_root = data_root = pathlib.Path(root) / data_name
 
         self.kpts_root = data_root / "kpts"
-        if self.cls_type != "all":
-            self.cls_root = data_root / f"{self.cls_id:02}"
-            self.roots_and_ids = self.get_roots_and_ids_for_cls_root(self.cls_root)
 
-        else:
-            raise AssertionError("Not implemented yet.")
-            self.all_cls_roots = [data_root / x for x in data_root.iterdir()]
-            self.cls_root = self.all_cls_roots[0]
-            all_roots_and_ids = [
-                self.get_roots_and_ids_for_cls_root(x) for x in self.all_cls_roots
-            ]
-            self.roots_and_ids = []
-            [self.roots_and_ids.extend(x) for x in zip(*all_roots_and_ids)]
+        all_files = (data_root / "rgb").glob("*")
+        files = [x for x in all_files if "_R" not in str(x)]
+        numeric_file_ids = list([int(x.stem.split("_")[1]) for x in files])
+        numeric_file_ids.sort()
+        self.file_ids = [id for id in numeric_file_ids]
 
         if cutoff is not None:
-            self.roots_and_ids = self.roots_and_ids[:cutoff]
+            self.file_ids = self.file_ids[:cutoff]
 
-        total_n_imgs = len(self.roots_and_ids)
+        total_n_imgs = len(self.file_ids)
 
-        split_ind = np.floor(len(self.roots_and_ids) * train_split).astype(int)
+        split_ind = np.floor(len(self.file_ids) * train_split).astype(int)
         if is_train:
-            self.roots_and_ids = self.roots_and_ids[:split_ind]
+            self.file_ids = self.file_ids[:split_ind]
         else:
-            self.roots_and_ids = self.roots_and_ids[split_ind:]
+            self.file_ids = self.file_ids[split_ind:]
 
-        with open(os.path.join(self.cls_root, "gt.json")) as f:
-            json_dict = json.load(f)
-        self.intrinsic_matrix = np.array(json_dict["camera_matrix"])
-        self.baseline = np.array(json_dict["stereo_baseline"])
+        # mesh_kpts_path = self.kpts_root / self.cls_type
+        # kpts = np.loadtxt(mesh_kpts_path / "farthest.txt")
+        # center = [np.loadtxt(mesh_kpts_path / "center.txt")]
+        # self.mesh_kpts = np.concatenate([kpts, center], axis=0)
 
-        self.rgbmask_augment = A.Compose(
-            [
-                A.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1, p=0.5),
-                A.RandomGamma(p=0.2),
-                A.AdvancedBlur(p=0.2),
-                A.GaussNoise(p=0.2),
-                A.FancyPCA(p=0.2),
-                A.RandomFog(fog_coef_lower=0.1, fog_coef_upper=0.3, p=0.1),
-            ],
-        )
+        # mesh_path = self.data_root / "meshes" / (self.cls_type + ".ply")
+        # mesh = o3d.io.read_triangle_mesh(str(mesh_path))
+        # self.mesh_vertices = np.asarray(mesh.sample_points_poisson_disk(1000).points)
 
-        mesh_kpts_path = self.kpts_root / self.cls_type
-        kpts = np.loadtxt(mesh_kpts_path / "farthest.txt")
-        center = [np.loadtxt(mesh_kpts_path / "center.txt")]
-        self.mesh_kpts = np.concatenate([kpts, center], axis=0)
-
-        mesh_path = self.data_root / "meshes" / (self.cls_type + ".ply")
-        mesh = o3d.io.read_triangle_mesh(str(mesh_path))
-        self.mesh_vertices = np.asarray(mesh.sample_points_poisson_disk(1000).points)
-
-        print("Initialized Blender Dataset.")
+        print("Initialized 6IMPOSE Dataset.")
         print(f"\tData name: {data_name}")
-        print(f"\tTotal split # of images: {len(self.roots_and_ids)}")
-        print(f"\tCls root: {self.cls_root}")
+        print(f"\tTotal split # of images: {len(self.file_ids)}")
+        print(f"\tCls root: {data_root}")
         print(f"\t# of all images: {total_n_imgs}")
         # print(f"\nIntrinsic matrix: {self.intrinsic_matrix}")
         print()
@@ -129,40 +92,22 @@ class _Blender(_Dataset):
     def to_tf_dataset(self):
         if self.use_cache:
             cache_name = "train" if self.is_train else "val"
-            cache_path = self.cls_root / f"cache_{cache_name}"
+            cache_path = self.data_root / f"cache_{cache_name}"
             try:
                 tfds = self.from_cache(cache_path)
             except FileNotFoundError:
                 self.cache(cache_path)
                 tfds = self.from_cache(cache_path)
 
-            def arrange_as_xy_tuple(d):
-                return (d["rgb"], d["depth"], d["intrinsics"], d["roi"], d["mesh_kpts"]), (
-                    d["RT"],
-                    d["mask"],
-                )
-
             print("USING CACHE FROM ", cache_path)
-            return (
-                tfds.map(arrange_as_xy_tuple)
-                .batch(self.batch_size, drop_remainder=True)
-                .prefetch(tf.data.AUTOTUNE)
-            )
+            return tfds.batch(self.batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
 
         raise NotImplementedError
-
-    def get_roots_and_ids_for_cls_root(self, cls_root: pathlib.Path):
-        all_files = (cls_root / "rgb").glob("*")
-        files = [x for x in all_files if "_R" not in str(x)]
-        numeric_file_ids = list([int(x.stem.split("_")[1]) for x in files])
-        numeric_file_ids.sort()
-        return [(cls_root, id) for id in numeric_file_ids]
 
     def visualize_example(self, example):
         color_depth = lambda x: cv2.applyColorMap(
             cv2.convertScaleAbs(x, alpha=255 / 2), cv2.COLORMAP_JET
         )
-
 
         rgb = example["rgb"]
         depth = example["depth"]
@@ -198,6 +143,7 @@ class _Blender(_Dataset):
 
         from losses.pvn_loss import PvnLoss
         from models.pvn3d_e2e import PVN3D_E2E
+
         num_samples = st.select_slider("num_samples", [2**i for i in range(5, 13)])
 
         h, w = rgb.shape[:2]
@@ -302,80 +248,76 @@ class _Blender(_Dataset):
             col.image(offset_view, caption=name)
 
     def __len__(self):
-        return len(self.roots_and_ids) * self.n_aug_per_image
+        return len(self.file_ids) * self.n_aug_per_image
 
     def __getitem__(self, idx):
         # this cycles n_aug_per_image times through the dataset
-        self.cls_root, i = self.roots_and_ids[idx % len(self.roots_and_ids)]
+        self.data_root, i = self.file_ids[idx % len(self.file_ids)]
 
         rgb = self.get_rgb(i)
         mask = self.get_mask(i)
         depth = self.get_depth(i)
-
-        rt_list = self.get_RT_list(i)  # FOR SINGLE OBJECT
+        intrinsics = self.get_intrinsics(i)
 
         # always add depth background
-        obj_pos = rt_list[0][:3, 3]  # FOR SINGLE OBJECT
-        depth = add_background_depth(
-            depth[tf.newaxis, :, :],
-            obj_pos=obj_pos,
-            camera_matrix=self.intrinsic_matrix.astype(np.float32),
-            rgb2noise=None,
-        )[
-            0
-        ].numpy()  # add and remove batch
+        depth = add_background_depth(depth[tf.newaxis, :, :])[0].numpy()  # add and remove batch
 
         # 6IMPOSE data augmentation
         if self.if_augment:
             depth = augment_depth(depth[tf.newaxis])[0].numpy()
             rgb = augment_rgb(rgb.astype(np.float32) / 255.0) * 255
-            rgb, mask, depth, rt_list = rotate_datapoint(img_likes=[rgb, mask, depth], Rt=rt_list)
+            
+        # pick the n most prominent (mosts visible) objects
+        # and return bbox and RT and binary mask for each?
+        # -> bboxes: (b, n, 4)
+        # -> RTs: (b, n, 4, 4)
+        # -> masks: (b, n, h, w, 1)
 
-        rt = rt_list[0]
-        bboxes = self.get_gt_bbox(i, mask=mask)  # FOR SINGLE OBJECT
-        if bboxes is None:
-            # create a bbox in the top left corner as negative example
-            bboxes = np.array([[0, 0, 200, 200]])
-        bboxes = bboxes[0]
-        mask = np.where(mask == self.cls_id, 1, 0).astype(np.uint8)  # FOR SINGLE OBJECT
+        bboxes = self.get_bboxes(i, top_k = 5)
+        ids = list(bboxes.keys())
+        bboxes = np.array(list(bboxes.values()))
+
+        RTs = self.get_RTs(i)  # FOR SINGLE OBJECT
+        RTs = np.array([RTs[id] for id in ids]) # (n, 4,4)
+
+        masks = np.array([np.where(mask == id, 1, 0) for id in ids]) # (n, h, w)
 
         return {
             "rgb": rgb.astype(np.uint8),
             "depth": depth.astype(np.float32),
-            "intrinsics": self.intrinsic_matrix.astype(np.float32),
-            "roi": bboxes[:4].astype(np.int32),
-            "mesh_kpts": self.mesh_kpts.astype(np.float32),
-            "RT": rt.astype(np.float32),
-            "mask": mask.astype(np.uint8),
+            "intrinsics": intrinsics.astype(np.float32),
+            "bboxes": bboxes.astype(np.int32),
+            "RTs": RTs.astype(np.float32),
+            "masks": masks.astype(np.uint8),
         }
 
-    def get_rgb(self, index):
-        rgb_path = os.path.join(self.cls_root, "rgb", f"rgb_{index:04}.png")
+    def get_rgb(self, index) -> np.ndarray:
+        rgb_path = os.path.join(self.data_root, "rgb", f"rgb_{index:04}.png")
         with Image.open(rgb_path) as rgb:
             rgb = np.array(rgb).astype(np.uint8)
         return rgb
 
-    def get_mask(self, index):
-        mask_path = os.path.join(self.cls_root, "mask", f"segmentation_{index:04}.exr")
+    def get_mask(self, index) -> np.ndarray:
+        mask_path = os.path.join(self.data_root, "mask", f"segmentation_{index:04}.exr")
         mask = cv2.imread(mask_path, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
         mask = mask[:, :, :1]
         return mask  # .astype(np.uint8)
 
-    def get_depth(self, index):
-        depth_path = os.path.join(self.cls_root, "depth", f"depth_{index:04}.exr")
+    def get_depth(self, index) -> np.ndarray:
+        depth_path = os.path.join(self.data_root, "depth", f"depth_{index:04}.exr")
         depth = cv2.imread(depth_path, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
         depth = depth[:, :, :1]
         depth_mask = depth < 5  # in meters, we filter out the background( > 5m)
         depth = depth * depth_mask
         return depth
 
-    def get_RT_list(self, index):
-        """return a list of tuples of RT matrix and cls_id [(RT_0, cls_id_0), (RT_1,, cls_id_1) ..., (RT_N, cls_id_N)]"""
-        with open(os.path.join(self.cls_root, "gt", f"gt_{index:05}.json")) as f:
+    def get_RTs(self, index) -> Dict[int, np.ndarray]:
+        """return a dict, mapping instance ids to RT matrices"""
+        with open(os.path.join(self.data_root, "gt", f"gt_{index:05}.json")) as f:
             shot = json.load(f)
 
         cam_quat = shot["cam_rotation"]
-        cam_rot = R.from_quat([*cam_quat[1:], cam_quat[0]])
+        cam_rot = R.from_quat(cam_quat)
         cam_pos = np.array(shot["cam_location"])
         cam_Rt = np.eye(4)
         cam_Rt[:3, :3] = cam_rot.as_matrix().T
@@ -383,80 +325,71 @@ class _Blender(_Dataset):
 
         objs = shot["objs"]
 
-        RT_list = []
+        RT_list = {}
 
-        if self.cls_type == "all":
-            for obj in objs:
-                cls_type = obj["name"]
-                cls_id = self.cls_dict[cls_type]
-                pos = np.array(obj["pos"])
-                quat = obj["rotation"]
-                rot = R.from_quat([*quat[1:], quat[0]])
-                Rt = np.eye(4)
-                Rt[:3, :3] = cam_rot.as_matrix().T @ rot.as_matrix()
-                Rt[:3, 3] = cam_rot.as_matrix().T @ (pos - cam_pos)
-                # RT_list.append((Rt, cls_id))
+        for obj in objs:
+            instance_id = obj["object id"]
+            pos = np.array(obj["pos"])
+            rot = R.from_quat(obj["rotation"])
+            RT = np.eye(4)
+            RT[:3, :3] = cam_rot.as_matrix().T @ rot.as_matrix()
+            RT[:3, 3] = cam_rot.as_matrix().T @ (pos - cam_pos)
 
-        else:
-            for obj in objs:  # here we only consider the single obj
-                if obj["name"] == self.cls_type:
-                    cls_type = obj["name"]
-                    pos = np.array(obj["pos"])
-                    quat = obj["rotation"]
-                    rot = R.from_quat([*quat[1:], quat[0]])
-                    Rt = np.eye(4)
-                    Rt[:3, :3] = cam_rot.as_matrix().T @ rot.as_matrix()
-                    Rt[:3, 3] = cam_rot.as_matrix().T @ (pos - cam_pos)
-                    # RT_list.append((Rt, self.cls_id))
-                    RT_list.append(Rt)
-        return np.array(RT_list)
+            RT_list[instance_id] = RT
 
-    def get_gt_bbox(self, index, mask=None) -> typing.Union[np.ndarray, None]:
-        bboxes = []
-        if mask is None:
-            mask = self.get_mask(index)
-        if self.cls_type == "all":
-            for cls, gt_mask_value in self.cls_dict.items():
-                bbox = self.get_bbox_from_mask(mask, gt_mask_value)
-                if bbox is None:
-                    continue
-                bbox = list(bbox)
-                bbox.append(self.cls_dict[cls])
-                bboxes.append(bbox)
-        else:
-            bbox = self.get_bbox_from_mask(mask, gt_mask_value=self.cls_id)
-            if bbox is None:
-                return None
-            bbox = list(bbox)
-            bbox.append(self.cls_id)
-            bboxes.append(bbox)
+        return RT_list
+    
+    def get_bboxes(self, index, top_k=None) -> Dict[int, np.ndarray]:
+        """return a dict, mapping instance ids to bbox coordinates"""
+        with open(os.path.join(self.data_root, "gt", f"gt_{index:05}.json")) as f:
+            shot = json.load(f)
 
-        return np.array(bboxes).astype(np.int32)
+        objs = shot["objs"]
 
-    def get_bbox_from_mask(self, mask, gt_mask_value):
-        """mask with object as 255 -> bbox [x1,y1, x2, y2]"""
+        if top_k is not None:
+            objs = sorted(objs, key=lambda x: x["visib_fract"], reverse=True)[:top_k]
 
-        if len(mask.shape) == 3:
-            mask = mask[:, :, 0]
-
-        y, x = np.where(mask == gt_mask_value)
-        inds = np.stack([x, y])
-        if 0 in inds.shape:
-            return None
-        x1, y1 = np.min(inds, 1)
-        x2, y2 = np.max(inds, 1)
-
-        if (x2 - x1) * (y2 - y1) < 1600:
-            return None
-
-        return (y1, x1, y2, x2)
+        return {obj["object id"]: np.array(obj["bbox_visib"]) for obj in objs}
+    
+    def get_intrinsics(self, index) -> np.ndarray:
+        with open(os.path.join(self.data_root, "gt", f"gt_{index:05}.json")) as f:
+            shot = json.load(f)
+        intrinsics = np.array(shot["cam_matrix"])
+        return intrinsics
 
 
-class TrainBlender(_Blender):
+class Train6IMPOSE(_6IMPOSE):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, if_augment=True, is_train=True, **kwargs)
 
 
-class ValBlender(_Blender):
+class Val6IMPOSE(_6IMPOSE):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, if_augment=False, is_train=False, **kwargs)
+
+
+"""
+data in the 6IMPOSE datasets:
+for each datapoint:
+    - [File] rgb
+    - [File] depth
+    - [File] mask_visib (using instance id and visible pixels)
+    - for each object:
+        - [FILE] masks without occlusion mask/mask_{obj.object_id:04}_{dataset_index:04}.exr (only for labelled objects)
+    - [in gt.json]:
+        - "cam_rotation": [x,y,z,w] (like scipy)
+        - "cam_location": [x,y,z]
+        - "cam_matrix": [3,3] intrinsic matrix (openCV)
+        for each object:
+            - "class": str
+            - "object id": int (instance id)
+            - "pos": [x,y,z]
+            - "rotation": [x,y,z,w] (like scipy)
+            - "bbox_visib": [x1,y1,x2,y2] in pixels, bbox of the object in the image
+            - "bbox_obj": [x1,y1,x2,y2] in pixels, bbox of the object in the image without occlusion
+            - "px_count_visib": int, number of visible pixels for this object,
+            - "px_count_valid": int, number of visible pixels with valid depth for this object,
+            - "px_count_all": int, number of visible pixels without occlusions for this object
+            - "visib_fract": px_count_visib / px_count_all (or 0.)
+        
+"""

@@ -186,16 +186,20 @@ class Pointnet_SA(tf.keras.layers.Layer):
 
         # arg sort
         idx = tf.argsort(dists, axis=-1)  # [b, m, n]
-        return idx[:, :, :nsample]  # [b, m, nsample]
-
-        dists = tf.gather(dists, idx, batch_dims=2)  # [b, m, nsample]
-
-        # replace inds where dist<radius with the first found index
-        idx = tf.where(dists < radius, idx, idx[:, :, :1])  # [b, m, nsample]
-
-        # truncate to nsample
         idx = idx[:, :, :nsample]  # [b, m, nsample]
-        return idx
+
+        # dists to the nsample nearest neighbors
+        corresponding_dists = tf.gather(dists, idx, batch_dims=2)
+        valid_mask = corresponding_dists < radius
+        # [b, m, nsample] distance at index i to the i-th nearest neighbor
+
+        # we sort to exactly replicate the CUDA version.
+        # although, sorting shouldn't be necessary and it kinda doesn't make sense
+        idx = tf.where(valid_mask, idx, tf.int32.max)  # [b, m, nsample]
+        sorted_idx = tf.sort(idx, axis=-1)  # [b, m, nsample]
+        sorted_idx = tf.where(valid_mask, sorted_idx, sorted_idx[:, :, :1])  # [b, m, nsample]
+
+        return sorted_idx
 
 
 class Pointnet_FP(tf.keras.layers.Layer):

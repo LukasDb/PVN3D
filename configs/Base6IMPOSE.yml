@@ -4,30 +4,24 @@ num_validate: 5
 Adam:
   learning_rate: 0.0002
 
-TrainBlender:
+Train6IMPOSE:
   batch_size: 32
-  root: "/home/lukas/data/blender/blender"
-  data_name: cps
+  root: "/home/lukas/data/6IMPOSE"
+  data_name: multi_cps
   cls_type: cpsduck
   train_split: 0.9
   #cutoff: 1000
   use_cache: True
-  im_size:
-    - 1080
-    - 1920
   n_aug_per_image: 4
 
-ValBlender: &val_config
+Val6IMPOSE: &val_config
   batch_size: 32
-  root: "/home/lukas/data/blender/blender"
-  data_name: cps
+  root: "/home/lukas/data/6IMPOSE"
+  data_name: multi_cps
   cls_type: cpsduck
   train_split: 0.9
   #cutoff: 1000
   use_cache: True
-  im_size:
-    - 1080
-    - 1920
   n_aug_per_image: 1
 
 PVN3D_E2E:

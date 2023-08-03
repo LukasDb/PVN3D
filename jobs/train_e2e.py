@@ -30,7 +30,8 @@ class TrainE2E(cvde.job.Job):
         self.loss_fn = loss_fn = PvnLoss(**job_cfg["PvnLoss"])
         optimizer = tf.keras.optimizers.Adam(**job_cfg["Adam"])
 
-    
+        #self.model.load_weights(f"checkpoints/TrainE2E/model_19")
+
         self.log_visualization(-1)
 
         num_epochs = job_cfg["epochs"]
@@ -44,7 +45,7 @@ class TrainE2E(cvde.job.Job):
 
             loss_vals = {}
             for x, y in train_set_tf:
-                if self.is_stopped:
+                if self.is_stopped():
                     return
 
                 with tf.GradientTape() as tape:
