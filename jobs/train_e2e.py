@@ -6,7 +6,6 @@ import cv2
 
 import cvde
 from models.pvn3d_e2e import PVN3D_E2E
-from datasets.blender import TrainBlender, ValBlender
 from losses.pvn_loss import PvnLoss
 
 
@@ -19,18 +18,30 @@ class TrainE2E(cvde.job.Job):
         print("Running job: ", self.name)
 
         self.model = model = PVN3D_E2E(**job_cfg["PVN3D_E2E"])
-        train_set = TrainBlender(**job_cfg["TrainBlender"])
-        val_config = job_cfg["ValBlender"]
-        val_set = ValBlender(**val_config)
-        self.demo_set = ValBlender(**val_config)
-        self.demo_set_tf = self.demo_set.to_tf_dataset().take(self.num_validate)
+        if job_cfg["dataset"] == 'blender':
+            train_config = job_cfg["TrainBlender"]
+            val_config = job_cfg["ValBlender"]
+            from datasets.blender import TrainBlender, ValBlender
+            train_gen = TrainBlender
+            val_gen = ValBlender
+        elif job_cfg["dataset"] == '6IMPOSE':
+            train_config = job_cfg["Train6IMPOSE"]
+            val_config = job_cfg["Val6IMPOSE"]
+            from datasets.simpose import Train6IMPOSE, Val6IMPOSE
+            train_gen = Train6IMPOSE
+            val_gen = Val6IMPOSE
 
+        train_set = train_gen(**train_config)
+        val_set = val_gen(**val_config)
+        self.demo_set = val_gen(**val_config)
+        self.demo_set_tf = self.demo_set.to_tf_dataset().take(self.num_validate)
         self.mesh_vertices = val_set.mesh_vertices
 
         self.loss_fn = loss_fn = PvnLoss(**job_cfg["PvnLoss"])
         optimizer = tf.keras.optimizers.Adam(**job_cfg["Adam"])
 
-        #self.model.load_weights(f"checkpoints/TrainE2E/model_19")
+        if 'weights' in job_cfg:
+            self.model.load_weights(job_cfg['weights'])
 
         self.log_visualization(-1)
 
@@ -67,7 +78,7 @@ class TrainE2E(cvde.job.Job):
                 )
 
             bar.close()
-            model.save(f"checkpoints/{self.name}/model_{epoch:02}", save_format="tf")
+            model.save(f"checkpoints/{self.tracker.name}/model_{epoch:02}", save_format="tf")
 
             for k, v in loss_vals.items():
                 loss_vals[k] = tf.reduce_mean(v)

@@ -39,7 +39,6 @@ class PVN3D_E2E(_PVN3D):
             mlp_params=mlp_params,
             build=False,
         )
-
         self.resnet_input_shape = tf.cast(resnet_input_shape, tf.int32)
 
         self.initial_pose_model = _InitialPoseModel(n_point_candidates)
@@ -76,7 +75,7 @@ class PVN3D_E2E(_PVN3D):
 
         fx, fy = camera_matrix[:, 0, 0], camera_matrix[:, 1, 1]  # [b,]
         f = tf.stack([fx, fy], axis=-1)[:, tf.newaxis, tf.newaxis, :]  # [b, 1, 1, 2]
-        
+
         diff = diff * f / depth
 
         mask = tf.logical_and(~tf.math.is_nan(diff), tf.abs(diff) < 5)
@@ -300,10 +299,6 @@ class PVN3D_E2E(_PVN3D):
         ) = inputs  # rgb [b,h,w,3], depth: [b,h,w,1], intrinsics: [b, 3,3], roi: [b,4]
         h, w = tf.shape(full_rgb)[1], tf.shape(full_rgb)[2]
 
-        # if training:
-        # inject noise to the roi
-        # roi = roi + tf.random.uniform(tf.shape(roi), -20, 20, dtype=tf.int32)
-
         # crop the image to the aspect ratio for resnet and integer crop factor
         bbox, crop_factor = self.get_crop_index(
             roi, h, w, self.resnet_input_shape[0], self.resnet_input_shape[1]
@@ -328,8 +323,8 @@ class PVN3D_E2E(_PVN3D):
             tf.range(tf.shape(full_rgb)[0]),
             self.resnet_input_shape[:2],
         )
-        
-        # stop gradients for preprocessing        
+
+        # stop gradients for preprocessing
         cropped_rgbs = tf.stop_gradient(cropped_rgbs)
         xyz = tf.stop_gradient(xyz)
         feats = tf.stop_gradient(feats)
@@ -352,4 +347,3 @@ class PVN3D_E2E(_PVN3D):
                 voted_kpts,
                 (kp, seg, cp, xyz, sampled_inds_in_original_image, mesh_kpts, cropped_rgbs),
             )
-

@@ -8,6 +8,7 @@ import numpy as np
 from PIL import Image
 import cv2
 import json
+import yaml
 from scipy.spatial.transform import Rotation as R
 import pathlib
 import streamlit as st
@@ -16,108 +17,66 @@ import open3d as o3d
 import itertools as it
 from typing import Dict
 
-from .augment import add_background_depth, augment_depth, augment_rgb
 
-"""
-data in the 6IMPOSE datasets:
-for each datapoint:
-    - [File] rgb
-    - [File] depth
-    - [File] mask_visib (using instance id and visible pixels)
-    - for each object:
-        - [FILE] masks without occlusion mask/mask_{obj.object_id:04}_{dataset_index:04}.exr (only for labelled objects)
-    - [in gt.json]:
-        - "cam_rotation": [x,y,z,w] (like scipy)
-        - "cam_location": [x,y,z]
-        - "cam_matrix": [3,3] intrinsic matrix (openCV)
-        for each object:
-            - "class": str
-            - "object id": int (instance id)
-            - "pos": [x,y,z]
-            - "rotation": [x,y,z,w] (like scipy)
-            - "bbox_visib": [x1,y1,x2,y2] in pixels, bbox of the object in the image
-            - "bbox_obj": [x1,y1,x2,y2] in pixels, bbox of the object in the image without occlusion
-            - "px_count_visib": int, number of visible pixels for this object,
-            - "px_count_valid": int, number of visible pixels with valid depth for this object,
-            - "px_count_all": int, number of visible pixels without occlusions for this object
-            - "visib_fract": px_count_visib / px_count_all (or 0.)
-        
-"""
-
-
-class _6IMPOSE(_Dataset):
+class LineMOD(_Dataset):
     def __init__(
         self,
         *,
-        if_augment,
-        is_train,
         cls_type,
         batch_size,
         use_cache,
         root,
-        train_split,
-        n_aug_per_image: int,
-        n_objects_per_image: int,
-        add_bbox_noise: bool,
-        bbox_noise: int,
-        cutoff=None,
     ):
         super().__init__()
-        self.colormap = [
-            [0, 0, 0],
-            [255, 255, 0],
-            [0, 0, 255],
-            [240, 240, 240],
-            [0, 255, 0],
-            [255, 0, 50],
-            [0, 255, 255],
-        ]
+        self.cls_dict = {
+            "ape": 1,
+            "benchvise": 2,
+            "bowl": 3,
+            "cam": 4,
+            "can": 5,
+            "cat": 6,
+            "cup": 7,
+            "driller": 8,
+            "duck": 9,
+            "eggbox": 10,
+            "glue": 11,
+            "holepuncher": 12,
+            "iron": 13,
+            "lamp": 14,
+            "phone": 15,
+        }
+        if cls_type.startswith("lm_"):
+            cls_type = cls_type[3:]
         self.cls_type = cls_type
-        self.if_augment = if_augment
+        self.cls_id = self.cls_dict[cls_type]
         self.batch_size = batch_size
         self.use_cache = use_cache
-        self.is_train = is_train
-        self.n_aug_per_image = n_aug_per_image
-        self.n_objects_per_image = n_objects_per_image
-        self.add_bbox_noise = add_bbox_noise
-        self.bbox_noise = bbox_noise
 
-        self.data_root = data_root = pathlib.Path(root) / cls_type
+        self.root = pathlib.Path(root)
+        self.data_root = data_root = self.root.joinpath(f"linemod/data/{self.cls_id:02}")
 
-        all_files = (data_root / "rgb").glob("*")
-        files = [x for x in all_files if "_R" not in str(x)]
-        numeric_file_ids = list([int(x.stem.split("_")[1]) for x in files])
-        numeric_file_ids.sort()
-        self.file_ids = [id for id in numeric_file_ids]
+        self.total_n_imgs = len(list(self.data_root.joinpath("rgb").glob("*.png")))
 
-        if cutoff is not None:
-            self.file_ids = self.file_ids[:cutoff]
-
-        total_n_imgs = len(self.file_ids)
-
-        split_ind = np.floor(len(self.file_ids) * train_split).astype(int)
-        if is_train:
-            self.file_ids = self.file_ids[:split_ind]
-        else:
-            self.file_ids = self.file_ids[split_ind:]
-
-        mesh_kpts_path = self.data_root.parent / "0_kpts" / self.cls_type
+        mesh_kpts_path = self.root / "lm_obj_kpts" / self.cls_type
         kpts = np.loadtxt(mesh_kpts_path / "farthest.txt")
-        center = [np.loadtxt(mesh_kpts_path / "center.txt")]
+        corners = np.loadtxt(mesh_kpts_path / "corners.txt")
+        center = [corners.mean(0)]
         self.mesh_kpts = np.concatenate([kpts, center], axis=0)
 
-        mesh_path = self.data_root.parent / "0_meshes" / self.cls_type / (self.cls_type + ".obj")
-        if not mesh_path.exists():
-            mesh_path = mesh_path.with_suffix(".ply")
-        if not mesh_path.exists():
-            raise ValueError(f"Mesh file {mesh_path} does not exist.")
+        mesh_path = self.root / "lm_obj_mesh" / f"obj_{self.cls_id:02}.ply"
         mesh = o3d.io.read_triangle_mesh(str(mesh_path))
         self.mesh_vertices = np.asarray(mesh.sample_points_poisson_disk(1000).points)
 
-        print("Initialized 6IMPOSE Dataset.")
-        print(f"\t# of all images: {total_n_imgs}")
+        self.intrinsic_matrix = np.array(
+            [[572.4114, 0.0, 325.2611], [0.0, 573.57043, 242.04899], [0.0, 0.0, 1.0]]
+        ).astype(np.float32)
+
+        with open(os.path.join(self.data_root, "gt.yml"), "r") as meta_file:
+            self.gt_list = yaml.load(meta_file, Loader=yaml.FullLoader)
+
+        print("Initialized LineMOD Dataset.")
+        print(f"\t# of all images: {self.total_n_imgs}")
         print(f"\tCls root: {data_root}")
-        print(f"\t# of images for this split: {len(self.file_ids)}")
         print(f"\t# of augmented datapoints: {len(self)}")
         # print(f"\nIntrinsic matrix: {self.intrinsic_matrix}")
         print()
@@ -294,81 +253,20 @@ class _6IMPOSE(_Dataset):
             col.image(offset_view, caption=name)
 
     def __len__(self):
-        return len(self.file_ids) * self.n_aug_per_image * self.n_objects_per_image
+        return self.total_n_imgs
 
     def __getitem__(self, idx):
         # this cycles n_aug_per_image times through the dataset
-        i = self.file_ids[idx % len(self.file_ids)]  # 0,1,2,3... i, 0, 1,2,..i
-        object_index = (
-            idx // len(self.file_ids) % self.n_objects_per_image
-        )  # 0,0,0,0,1,1,1,1,2,2,2,2
-
-        rgb = self.get_rgb(i)
-        depth = self.get_depth(i)
-        mask_visib = self.get_mask(i)
-
-        # always add depth background
-        depth = add_background_depth(depth[tf.newaxis, :, :])[0].numpy()  # add and remove batch
-
-        # 6IMPOSE data augmentation
-        if self.if_augment:
-            depth = augment_depth(depth[tf.newaxis])[0].numpy()
-            rgb = augment_rgb(rgb.astype(np.float32) / 255.0) * 255
-
-        with open(os.path.join(self.data_root, "gt", f"gt_{i:05}.json")) as f:
-            shot = json.load(f)
-
-        intrinsics = np.array(shot["cam_matrix"])
-
-        cam_quat = shot["cam_rotation"]
-        cam_rot = R.from_quat(cam_quat)
-        cam_pos = np.array(shot["cam_location"])
-        cam_Rt = np.eye(4)
-        cam_Rt[:3, :3] = cam_rot.as_matrix().T
-        cam_Rt[:3, 3] = -cam_rot.as_matrix() @ cam_pos
-
-        all_objs = shot["objs"]
-        cls_objs = [obj for obj in all_objs if obj["class"] == self.cls_type]
-        # filter out objects that are too close to the image border
-        # too close means one of the bbox corners is one the edge
-
-        h, w = rgb.shape[:2]
-        objs = [
-            obj
-            for obj in cls_objs
-            if obj["bbox_visib"][0] > 0
-            and obj["bbox_visib"][1] > 0
-            and obj["bbox_visib"][2] < w - 1
-            and obj["bbox_visib"][3] < h - 1
-        ]
-
-        if len(objs) == 0:
-            # crude fix. If all objects clip the image, then so be it
-            # probably camera is too close in these cases
-            objs = cls_objs
-
-        px_count = lambda x: x["px_count_valid"]
-        objs = sorted(objs, key=px_count, reverse=True)
-
-        obj = objs[object_index % len(objs)]
-        instance_id = obj["object id"]
-        pos = np.array(obj["pos"])
-        rot = R.from_quat(obj["rotation"])
-        RT = np.eye(4)
-        RT[:3, :3] = cam_rot.as_matrix().T @ rot.as_matrix()
-        RT[:3, 3] = cam_rot.as_matrix().T @ (pos - cam_pos)
-
-        bbox = obj["bbox_visib"]
-        bbox = np.array((bbox[1], bbox[0], bbox[3], bbox[2]))  # change order to y1,x1,y2,x2
-        mask = np.where(mask_visib == instance_id, 1, 0)
-
-        if self.add_bbox_noise:
-            bbox += np.random.randint(-self.bbox_noise, self.bbox_noise, size=bbox.shape)
+        rgb = self.get_rgb(idx)
+        depth = self.get_depth(idx)
+        mask = np.where(self.get_mask(idx) == 255, 1, 0).astype(np.uint8)
+        bbox = self.get_bbox(idx)
+        RT = self.get_RT(idx)
 
         return {
             "rgb": rgb.astype(np.uint8),
             "depth": depth.astype(np.float32),
-            "intrinsics": intrinsics.astype(np.float32),
+            "intrinsics": self.intrinsic_matrix.astype(np.float32),
             "roi": bbox.astype(np.int32),
             "RT": RT.astype(np.float32),
             "mask": mask.astype(np.uint8),
@@ -376,31 +274,60 @@ class _6IMPOSE(_Dataset):
         }
 
     def get_rgb(self, index) -> np.ndarray:
-        rgb_path = os.path.join(self.data_root, "rgb", f"rgb_{index:04}.png")
+        rgb_path = os.path.join(self.data_root, "rgb", f"{index:04}.png")
         with Image.open(rgb_path) as rgb:
             rgb = np.array(rgb).astype(np.uint8)
         return rgb
 
-    def get_mask(self, index) -> np.ndarray:
-        mask_path = os.path.join(self.data_root, "mask", f"mask_{index:04}.exr")
-        mask = cv2.imread(mask_path, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
-        mask = mask[:, :, :1]
-        return mask  # .astype(np.uint8)
+    def get_mask(self, index):
+        with Image.open(os.path.join(self.data_root, "mask", f"{index:04}.png")) as mask:
+            mask = np.array(mask)
+        return mask
 
-    def get_depth(self, index) -> np.ndarray:
-        depth_path = os.path.join(self.data_root, "depth", f"depth_{index:04}.exr")
-        depth = cv2.imread(depth_path, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
-        depth = depth[:, :, :1]
-        depth_mask = depth < 5  # in meters, we filter out the background( > 5m)
-        depth = depth * depth_mask
-        return depth
+    def get_depth(self, index):
+        with Image.open(os.path.join(self.data_root, "depth", f"{index:04}.png")) as depth:
+            dpt = np.array(depth)[..., np.newaxis]
+            return dpt / 1000.0  # to m
 
+    def get_bbox(self, index):
+        gt = self.gt_list[index]
 
-class Train6IMPOSE(_6IMPOSE):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, if_augment=True, is_train=True, **kwargs)
+        if self.cls_id == 2:
+            gt = [x for x in gt if x["obj_id"] == self.cls_id][0]
+        else:
+            gt = gt[0]
 
+        # elif self.cls_id == 16:
+        #     for i in range(0, len(meta)):
+        #         meta_list.append(meta[i])
 
-class Val6IMPOSE(_6IMPOSE):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, if_augment=False, is_train=False, **kwargs)
+        bbox = np.array(gt["obj_bb"])
+
+        bbox = self.convert2pascal(bbox)
+        bbox = [bbox[1], bbox[0], bbox[3], bbox[2]]  # [ymin, xmin, ymax, xmax]
+        return np.array(bbox)
+
+    @staticmethod
+    def convert2pascal(box_coor):
+        """
+        params: box_coor [xmin, ymin, w, h]
+        return: box_coor in pascal_voc format [xmin, ymin, xmax, ymax] (left upper corner and right bottom corner)
+        """
+        x_min, y_min, w, h = box_coor
+        x_max = x_min + w
+        y_max = y_min + h
+        return [x_min, y_min, x_max, y_max]
+
+    def get_RT(self, index):
+        gt = self.gt_list[index]
+        if self.cls_id == 2:
+            gt = [x for x in gt if x["obj_id"] == self.cls_id][0]
+        else:
+            gt = gt[0]
+
+        R = np.resize(np.array(gt["cam_R_m2c"]), (3, 3))
+        T = np.array(gt["cam_t_m2c"]) / 1000.0
+        RT = np.zeros((4, 4))
+        RT[:3, :3] = R
+        RT[:3, 3] = T
+        return RT

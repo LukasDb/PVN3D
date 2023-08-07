@@ -1,31 +1,38 @@
-epochs: 50
-num_validate: 5
-dataset: 6IMPOSE
+num_validate: 15
+#weights: "checkpoints/TrainE2E/model_32" # this is trained on multi
+weights: "checkpoints/cpsduck (continued)/model_*"
 
-# weights: ...
-
-Adam:
-  learning_rate: 0.0002
+datasets:
+  - Val6IMPOSE
+  - ValBlender
+  - LineMOD
 
 shared: &shared
-  root: "/home/lukas/data/6IMPOSE"
   cls_type: lm_cam
-  train_split: 0.9
   batch_size: 32
   use_cache: True
-  n_aug_per_image: 1
-  n_objects_per_image: 5
-  bbox_noise: 20 # shift by how many pixels
-
-Train6IMPOSE:
-  <<: *shared
-  #cutoff: 2 # truncate dataset for testing
-  add_bbox_noise: true
 
 Val6IMPOSE:
   <<: *shared
+  root: "/home/lukas/data/6IMPOSE"
+  train_split: 0.9
   #cutoff: 1000
+  n_aug_per_image: 1
+  n_objects_per_image: 5
   add_bbox_noise: false
+  bbox_noise: 20 # shift by how many pixels
+
+ValBlender:
+  <<: *shared
+  root: "/home/lukas/data/blender/blender"
+  data_name: cps
+  train_split: 0.9
+  #cutoff: 1000
+  n_aug_per_image: 1
+
+LineMOD:
+  <<: *shared
+  root: "/home/lukas/data/linemod"
 
 
 PVN3D_E2E:
