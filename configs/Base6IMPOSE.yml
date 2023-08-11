@@ -2,6 +2,9 @@ epochs: 50
 num_validate: 5
 dataset: 6IMPOSE
 
+weights: "checkpoints/lm_cam (no-seg loss)/model_01"
+#weights: "checkpoints/lm_cam (continued)/model_49"
+
 # weights: ...
 
 Adam:
@@ -85,6 +88,7 @@ PVN3D_E2E:
 
 PvnLoss:
   binary_loss: True
+  use_segmentation: True # default: True
   kp_loss_discount: 1.0
   cp_loss_discount: 1.0
   seg_loss_discount: 0.01

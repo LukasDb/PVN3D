@@ -82,9 +82,9 @@ class _6IMPOSE(_Dataset):
         self.add_bbox_noise = add_bbox_noise
         self.bbox_noise = bbox_noise
 
-        self.data_root = data_root = pathlib.Path(root) / cls_type
+        self.data_root = pathlib.Path(root).joinpath(cls_type)
 
-        all_files = (data_root / "rgb").glob("*")
+        all_files = self.data_root.joinpath("rgb").glob("*")
         files = [x for x in all_files if "_R" not in str(x)]
         numeric_file_ids = list([int(x.stem.split("_")[1]) for x in files])
         numeric_file_ids.sort()
@@ -106,7 +106,7 @@ class _6IMPOSE(_Dataset):
         center = [np.loadtxt(mesh_kpts_path / "center.txt")]
         self.mesh_kpts = np.concatenate([kpts, center], axis=0)
 
-        mesh_path = self.data_root.parent / "0_meshes" / self.cls_type / (self.cls_type + ".obj")
+        mesh_path = self.data_root.parent.joinpath(f"0_meshes/{self.cls_type}/{self.cls_type}.obj")
         if not mesh_path.exists():
             mesh_path = mesh_path.with_suffix(".ply")
         if not mesh_path.exists():
@@ -116,7 +116,7 @@ class _6IMPOSE(_Dataset):
 
         print("Initialized 6IMPOSE Dataset.")
         print(f"\t# of all images: {total_n_imgs}")
-        print(f"\tCls root: {data_root}")
+        print(f"\tCls root: {self.data_root}")
         print(f"\t# of images for this split: {len(self.file_ids)}")
         print(f"\t# of augmented datapoints: {len(self)}")
         # print(f"\nIntrinsic matrix: {self.intrinsic_matrix}")
@@ -140,7 +140,6 @@ class _6IMPOSE(_Dataset):
                     d["mask"],
                 )
 
-            print("USING CACHE FROM ", cache_path)
             return (
                 tfds.map(arrange_as_xy_tuple)
                 .batch(self.batch_size, drop_remainder=True)

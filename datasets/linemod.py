@@ -65,7 +65,7 @@ class LineMOD(_Dataset):
 
         mesh_path = self.root / "lm_obj_mesh" / f"obj_{self.cls_id:02}.ply"
         mesh = o3d.io.read_triangle_mesh(str(mesh_path))
-        self.mesh_vertices = np.asarray(mesh.sample_points_poisson_disk(1000).points)
+        self.mesh_vertices = np.asarray(mesh.sample_points_poisson_disk(1000).points) / 1000.
 
         self.intrinsic_matrix = np.array(
             [[572.4114, 0.0, 325.2611], [0.0, 573.57043, 242.04899], [0.0, 0.0, 1.0]]
@@ -83,8 +83,7 @@ class LineMOD(_Dataset):
 
     def to_tf_dataset(self):
         if self.use_cache:
-            cache_name = "train" if self.is_train else "val"
-            cache_path = self.data_root / f"cache_{cache_name}"
+            cache_path = self.data_root / f"cache"
             try:
                 tfds = self.from_cache(cache_path)
             except FileNotFoundError:

@@ -11,10 +11,12 @@ class PvnLoss:
         kp_loss_discount,
         cp_loss_discount,
         seg_loss_discount,
+        use_segmentation: bool,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.binary_loss = binary_loss
+        self.use_segmentation = use_segmentation
         self.kp_loss_discount = kp_loss_discount
         self.cp_loss_discount = cp_loss_discount
         self.seg_loss_discount = seg_loss_discount
@@ -37,10 +39,12 @@ class PvnLoss:
             kpts_cpts,
         )
 
-        loss_kp = self.l1_loss(offset_pred=kp_pred, offset_gt=kp_gt, mask_labels=mask_selected)
-        loss_cp = self.l1_loss(offset_pred=cp_pred, offset_gt=cp_gt, mask_labels=mask_selected)
-        # loss_kp = tf.reduce_mean(tf.norm(kp_pred - kp_gt, axis=-1))
-        # loss_cp = tf.reduce_mean(tf.norm(cp_pred - cp_gt, axis=-1))
+        if self.use_segmentation:
+            loss_kp = self.l1_loss(offset_pred=kp_pred, offset_gt=kp_gt, mask_labels=mask_selected)
+            loss_cp = self.l1_loss(offset_pred=cp_pred, offset_gt=cp_gt, mask_labels=mask_selected)
+        else:
+            loss_kp = tf.reduce_mean(tf.math.abs(kp_pred - kp_gt))
+            loss_cp = tf.reduce_mean(tf.math.abs(cp_pred - cp_gt))
 
         if self.binary_loss:
             loss_seg = self.BinaryFocalLoss(mask_selected, seg_pred)
@@ -83,8 +87,7 @@ class PvnLoss:
             kp_offsets: (b,n_pts,n_kpts,3) Offsets to the keypoints
             cp_offsets: (b,n_pts,1,3) Offsets to the center point
         """
-        
-        
+
         # WHICH ONE IS CORRECT!?????
         # transform kpts_cpts to camera frame using rt
         kpts_cpts_cam = (
