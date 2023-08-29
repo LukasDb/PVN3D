@@ -15,6 +15,7 @@ import itertools as it
 import open3d as o3d
 import itertools as it
 from typing import Dict
+import minexr
 
 from .augment import add_background_depth, augment_depth, augment_rgb
 
@@ -391,10 +392,10 @@ class _6IMPOSE(_Dataset):
         return rgb
 
     def get_mask(self, index) -> np.ndarray:
-        mask_path = os.path.join(self.data_root, "mask", f"mask_{index:04}.exr")
-        mask = cv2.imread(mask_path, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
-        mask = mask[:, :, :1]
-        return mask  # .astype(np.uint8)
+        with pathlib.Path(self.data_root).joinpath(f"mask/mask_{index:04}.exr").open("rb") as F:
+            reader = minexr.load(F)
+        mask = reader.select(["visib.R"]).astype(np.uint8)
+        return mask
 
     def get_depth(self, index) -> np.ndarray:
         depth_path = os.path.join(self.data_root, "depth", f"depth_{index:04}.exr")
