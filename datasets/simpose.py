@@ -101,18 +101,28 @@ class _6IMPOSE(_Dataset):
         else:
             self.file_ids = self.file_ids[split_ind:]
 
-        mesh_kpts_path = self.data_root.parent / "0_kpts" / self.cls_type
-        kpts = np.loadtxt(mesh_kpts_path / "farthest.txt")
-        center = [np.loadtxt(mesh_kpts_path / "center.txt")]
-        self.mesh_kpts = np.concatenate([kpts, center], axis=0)
-
-        mesh_path = self.data_root.parent.joinpath(f"0_meshes/{self.cls_type}/{self.cls_type}.obj")
+        mesh_path = self.data_root.joinpath(f"meshes/{self.cls_type}.obj")
         if not mesh_path.exists():
             mesh_path = mesh_path.with_suffix(".ply")
         if not mesh_path.exists():
             raise ValueError(f"Mesh file {mesh_path} does not exist.")
         mesh = o3d.io.read_triangle_mesh(str(mesh_path))
         self.mesh_vertices = np.asarray(mesh.sample_points_poisson_disk(1000).points)
+
+        mesh_kpts_path = self.data_root.parent / "0_kpts" / self.cls_type
+        if not mesh_kpts_path.exists():
+            mesh_kpts_path.mkdir(parents=True)
+            print("Generating mesh keypoints...")
+            print("Make sure to use the correct keypoints!")
+            center_point = mesh.get_center()
+            np.savetxt(mesh_kpts_path / "center.txt", center_point)
+            mesh_kpts = np.asarray(mesh.sample_points_poisson_disk(8).points)
+            np.savetxt(mesh_kpts_path / "farthest.txt", mesh_kpts)
+
+        kpts = np.loadtxt(mesh_kpts_path / "farthest.txt")
+        center = [np.loadtxt(mesh_kpts_path / "center.txt")]
+
+        self.mesh_kpts = np.concatenate([kpts, center], axis=0)
 
         print("Initialized 6IMPOSE Dataset.")
         print(f"\t# of all images: {total_n_imgs}")
