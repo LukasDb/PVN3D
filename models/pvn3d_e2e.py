@@ -128,6 +128,7 @@ class PVN3D_E2E(_PVN3D):
         # normals = PVN3D_E2E.compute_normals(depth, camera_matrix) # [b, h*w, 3]
         normal_map = PVN3D_E2E.compute_normal_map(depth, camera_matrix)  # [b, h,w,3]
 
+        b = tf.shape(rgb)[0]
         h_depth = tf.shape(depth)[1]
         w_depth = tf.shape(depth)[2]
         x_map, y_map = tf.meshgrid(
@@ -152,17 +153,17 @@ class PVN3D_E2E(_PVN3D):
         # get masked indices (valid truncated depth inside of roi)
         is_valid = tf.logical_and(depth[..., 0] > 1e-6, depth[..., 0] < depth_trunc)
         inds = tf.where(tf.logical_and(in_roi, is_valid))
-        inds = tf.cast(inds, tf.int32)  # [None, 3]
+        inds = tf.cast(inds, tf.int32)  # [None, 3] RAGGED
 
         inds = tf.random.shuffle(inds)
 
         # split index list into [b, None, 3] ragged tensor by using the batch index
-        inds = tf.ragged.stack_dynamic_partitions(
-            inds, inds[:, 0], tf.shape(rgb)[0]
-        )  # [b, None, 3]
+        inds = tf.ragged.stack_dynamic_partitions(inds, inds[:, 0], b)  # [b, None, 3] # RAGGED
+        inds = inds.to_tensor(shape=(b, num_sample_points, 3), default_value=-1)  # padded with 0
 
-        # TODO if we dont have enough points, we pad the indices with 0s, how to handle that?
-        inds = inds[:, :num_sample_points].to_tensor()  # [b, num_points, 3]
+        # get a valid sampled point per batch (the first one)
+        valid_ind = inds[:, 0, :]
+        inds = tf.where(inds == -1, valid_ind[:, tf.newaxis, :], inds)
 
         # calculate xyz
         cam_cx, cam_cy = camera_matrix[:, 0, 2], camera_matrix[:, 1, 2]

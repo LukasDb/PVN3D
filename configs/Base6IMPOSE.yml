@@ -2,8 +2,9 @@ epochs: 50
 num_validate: 5
 dataset: 6IMPOSE
 
-weights: "checkpoints/lm_cam (no-seg loss)/model_01"
+#weights: "checkpoints/lm_cam (no-seg loss)/model_01"
 #weights: "checkpoints/lm_cam (continued)/model_49"
+weights: "checkpoints/TrainE2E_Base6IMPOSE/model_13"
 
 # weights: ...
 
@@ -11,14 +12,14 @@ Adam:
   learning_rate: 0.0002
 
 shared: &shared
-  root: "/home/lukas/data/6IMPOSE"
-  cls_type: lm_cam
+  root: "/home/lukas/data_ssd/6IMPOSE"
+  cls_type: nema17_holder
   train_split: 0.9
   batch_size: 32
   use_cache: True
   n_aug_per_image: 1
   n_objects_per_image: 5
-  bbox_noise: 20 # shift by how many pixels
+  bbox_noise: 20 # shift by how maximum many pixels
 
 Train6IMPOSE:
   <<: *shared
@@ -33,13 +34,13 @@ Val6IMPOSE:
 
 PVN3D_E2E:
   resnet_input_shape: [80, 80, 3]
-  n_point_candidates: 10
+  n_point_candidates: 100
   num_kpts: 8
   num_cpts: 1
   num_cls: 1
   dim_xyz: 3
   resnet_params:
-    backbone_type: "resnet18"
+    backbone_type: "resnet34"
     down_sample_factor: 8
     backbone_weights: ""
     interpolation_method: "nearest"

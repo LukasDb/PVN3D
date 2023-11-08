@@ -14,9 +14,8 @@ import streamlit as st
 import itertools as it
 import open3d as o3d
 import itertools as it
-from typing import Dict
-import minexr
 
+from .exr import EXR
 from .augment import add_background_depth, augment_depth, augment_rgb
 
 """
@@ -110,15 +109,23 @@ class _6IMPOSE(_Dataset):
         mesh = o3d.io.read_triangle_mesh(str(mesh_path))
         self.mesh_vertices = np.asarray(mesh.sample_points_poisson_disk(1000).points)
 
-        mesh_kpts_path = self.data_root.parent / "0_kpts" / self.cls_type
+        mesh_kpts_path = self.data_root.parent.joinpath(f"0_kpts/{self.cls_type}")
         if not mesh_kpts_path.exists():
             mesh_kpts_path.mkdir(parents=True)
             print("Generating mesh keypoints...")
             print("Make sure to use the correct keypoints!")
+
             center_point = mesh.get_center()
-            np.savetxt(mesh_kpts_path / "center.txt", center_point)
+            if mesh_kpts_path.joinpath("center.txt").exists():
+                print("WARNING: WOULD OVERWRITE KEYPOINTS")
+            else:
+                np.savetxt(mesh_kpts_path / "center.txt", center_point)
+
             mesh_kpts = np.asarray(mesh.sample_points_poisson_disk(8).points)
-            np.savetxt(mesh_kpts_path / "farthest.txt", mesh_kpts)
+            if mesh_kpts_path.joinpath("farthest.txt").exists():
+                print("WARNING: WOULD OVERWRITE KEYPOINTS")
+            else:
+                np.savetxt(mesh_kpts_path / "farthest.txt", mesh_kpts)
 
         kpts = np.loadtxt(mesh_kpts_path / "farthest.txt")
         center = [np.loadtxt(mesh_kpts_path / "center.txt")]
@@ -134,6 +141,12 @@ class _6IMPOSE(_Dataset):
         print()
 
     def to_tf_dataset(self):
+        def arrange_as_xy_tuple(d):
+            return (d["rgb"], d["depth"], d["intrinsics"], d["roi"], d["mesh_kpts"]), (
+                d["RT"],
+                d["mask"],
+            )
+
         if self.use_cache:
             cache_name = "train" if self.is_train else "val"
             cache_path = self.data_root / f"cache_{cache_name}"
@@ -145,19 +158,31 @@ class _6IMPOSE(_Dataset):
 
             print("USING CACHE FROM ", cache_path)
 
-            def arrange_as_xy_tuple(d):
-                return (d["rgb"], d["depth"], d["intrinsics"], d["roi"], d["mesh_kpts"]), (
-                    d["RT"],
-                    d["mask"],
-                )
-
             return (
-                tfds.map(arrange_as_xy_tuple)
-                .batch(self.batch_size, drop_remainder=True)
+                tfds.map(
+                    arrange_as_xy_tuple, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False
+                )
+                .batch(self.batch_size, drop_remainder=True, num_parallel_calls=tf.data.AUTOTUNE)
                 .prefetch(tf.data.AUTOTUNE)
             )
 
-        raise NotImplementedError
+        signature = {}
+
+        data = self[0]
+        for k, v in data.items():
+            signature[k] = tf.TensorSpec(shape=v.shape, dtype=v.dtype, name=k)
+
+        return (
+            tf.data.Dataset.from_generator(lambda: iter(self), output_signature=signature)
+            .map(arrange_as_xy_tuple, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False)
+            .batch(
+                self.batch_size,
+                drop_remainder=True,
+                num_parallel_calls=tf.data.AUTOTUNE,
+                deterministic=False,
+            )
+            .prefetch(tf.data.AUTOTUNE)
+        )
 
     def visualize_example(self, example):
         color_depth = lambda x: cv2.applyColorMap(
@@ -166,6 +191,8 @@ class _6IMPOSE(_Dataset):
 
         rgb = example["rgb"]
         depth = example["depth"]
+        depth += np.random.normal(loc=0.0, size=depth.shape, scale=0.2)
+
         intrinsics = example["intrinsics"].astype(np.float32)
         bboxes = example["roi"]
         kpts = example["mesh_kpts"]
@@ -318,12 +345,12 @@ class _6IMPOSE(_Dataset):
         mask_visib = self.get_mask(i)
 
         # always add depth background
-        depth = add_background_depth(depth[tf.newaxis, :, :])[0].numpy()  # add and remove batch
-
-        # 6IMPOSE data augmentation
-        if self.if_augment:
-            depth = augment_depth(depth[tf.newaxis])[0].numpy()
-            rgb = augment_rgb(rgb.astype(np.float32) / 255.0) * 255
+        # HACK DISABLED AUGMENT AND BACKGROUND!
+        # depth = add_background_depth(depth[tf.newaxis, :, :])[0].numpy()  # add and remove batch
+        # # 6IMPOSE data augmentation
+        # if self.if_augment:
+        #     depth = augment_depth(depth[tf.newaxis])[0].numpy()
+        #     rgb = augment_rgb(rgb.astype(np.float32) / 255.0) * 255
 
         with open(os.path.join(self.data_root, "gt", f"gt_{i:05}.json")) as f:
             shot = json.load(f)
@@ -352,10 +379,13 @@ class _6IMPOSE(_Dataset):
             and obj["bbox_visib"][3] < h - 1
         ]
 
+        objs = [x for x in objs if x["visib_fract"] > 0.3]
+
         if len(objs) == 0:
             # crude fix. If all objects clip the image, then so be it
             # probably camera is too close in these cases
-            objs = cls_objs
+            # objs = cls_objs
+            return self.__getitem__(idx + 1)  # skips the current image
 
         px_count = lambda x: x["px_count_valid"]
         objs = sorted(objs, key=px_count, reverse=True)
@@ -392,10 +422,12 @@ class _6IMPOSE(_Dataset):
         return rgb
 
     def get_mask(self, index) -> np.ndarray:
-        with pathlib.Path(self.data_root).joinpath(f"mask/mask_{index:04}.exr").open("rb") as F:
-            reader = minexr.load(F)
-        mask = reader.select(["visib.R"]).astype(np.uint8)
-        return mask
+        # with pathlib.Path(self.data_root).joinpath(f"mask/mask_{index:04}.exr").open("rb") as F:
+        #    reader = minexr.load(F)
+        # mask = reader.select(["visib.R"]).astype(np.uint8)
+        mask = EXR(self.data_root.joinpath(f"mask/mask_{index:04}.exr")).read("visib.R")
+        mask = mask.astype(np.uint8)[..., np.newaxis]
+        return mask  # [h, w, 1]
 
     def get_depth(self, index) -> np.ndarray:
         depth_path = os.path.join(self.data_root, "depth", f"depth_{index:04}.exr")
@@ -403,7 +435,7 @@ class _6IMPOSE(_Dataset):
         depth = depth[:, :, :1]
         depth_mask = depth < 5  # in meters, we filter out the background( > 5m)
         depth = depth * depth_mask
-        return depth
+        return depth  # [h, w, 1]
 
 
 class Train6IMPOSE(_6IMPOSE):
