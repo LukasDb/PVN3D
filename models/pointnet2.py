@@ -1,7 +1,7 @@
 import tensorflow as tf
 from tensorflow.keras.layers import Conv1D
-from .pointnet2_utils.pnet2_layers.layers import Pointnet_SA, Pointnet_FP
 from dataclasses import dataclass
+
 
 @dataclass
 class PointNet2Params:
@@ -28,6 +28,8 @@ class _PointNetModel(tf.keras.Model):
         self.init_network()
 
     def init_network(self):
+        from .pointnet2_utils.pnet2_layers.layers import Pointnet_SA, Pointnet_FP
+
         self.sa_1 = Pointnet_SA(
             npoint=512,
             radius=0.1,
@@ -74,9 +76,7 @@ class _PointNetModel(tf.keras.Model):
 
         self.fp_3 = Pointnet_FP(mlp=[256, 128], activation=self.activation, bn=self.bn)
 
-        self.fp_4 = Pointnet_FP(
-            mlp=[128, 128, 128], activation=self.activation, bn=self.bn
-        )
+        self.fp_4 = Pointnet_FP(mlp=[128, 128, 128], activation=self.activation, bn=self.bn)
 
         self.conv1d = Conv1D(filters=self.num_classes, kernel_size=1, activation=None)
 

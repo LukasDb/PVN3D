@@ -18,7 +18,6 @@ import typing
 
 from .augment import add_background_depth, augment_depth, augment_rgb, rotate_datapoint
 
-
 class _Blender(_Dataset):
     def __init__(
         self,
@@ -65,7 +64,7 @@ class _Blender(_Dataset):
         self.is_train = is_train
         self.n_aug_per_image = n_aug_per_image
 
-        self.data_root = data_root = pathlib.Path(root) / data_name
+        self.data_root = data_root = pathlib.Path(root).expanduser() / data_name
 
         self.kpts_root = data_root / "kpts"
         if self.cls_type != "all":
@@ -163,7 +162,6 @@ class _Blender(_Dataset):
             cv2.convertScaleAbs(x, alpha=255 / 2), cv2.COLORMAP_JET
         )
 
-
         rgb = example["rgb"]
         depth = example["depth"]
         intrinsics = example["intrinsics"].astype(np.float32)
@@ -198,6 +196,7 @@ class _Blender(_Dataset):
 
         from losses.pvn_loss import PvnLoss
         from models.pvn3d_e2e import PVN3D_E2E
+
         num_samples = st.select_slider("num_samples", [2**i for i in range(5, 13)])
 
         h, w = rgb.shape[:2]

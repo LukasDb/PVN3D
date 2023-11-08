@@ -1,7 +1,6 @@
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras.layers import Conv1D, BatchNormalization, Layer
-from .pointnet2_utils.pnet2_layers.layers import Pointnet_SA
 from dataclasses import dataclass
 
 
@@ -113,6 +112,8 @@ class _PointNet2TfModel(tf.keras.Model):
         self.init_network()
 
     def init_network(self):
+        from .pointnet2_utils.pnet2_layers.layers import Pointnet_SA
+
         self.sa_1 = Pointnet_SA(
             npoint=512,  # todo we don't need that much
             radius=0.1,

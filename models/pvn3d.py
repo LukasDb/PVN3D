@@ -4,9 +4,7 @@ import os
 os.environ["SM_FRAMEWORK"] = "tf.keras"
 from .resnet import ResNetParams, _ResNet
 from .pspnet import PspNetParams, _PspNet
-from .pointnet2_tfx import _PointNet2TfXModel
-from .pointnet2_tf import _PointNet2TfModel, PointNet2Params
-from .pointnet2 import _PointNetModel
+from .pointnet2_tfx import PointNet2Params
 from .densefusion import _DenseFusionNet, DenseFusionNetParams
 from .mlp import _MlpNets, MlpNetsParams
 from .utils import match_choose_adp
@@ -71,10 +69,12 @@ class PVN3D(tf.keras.Model):
         self.psp_model = self.psp_net.build_psp_model(list(self.resnet_model.output_shape)[1:])
 
         if self.point_net2_params.use_tfx:
+            from .pointnet2_tfx import _PointNet2TfXModel
             self.pointnet2_model = _PointNet2TfXModel(
                 self.point_net2_params, num_classes=self.num_cls
             )
         elif self.point_net2_params.use_tf_interpolation:
+            from .pointnet2_tf import _PointNet2TfModel
             self.pointnet2_model = _PointNet2TfModel(
                 self.point_net2_params, num_classes=self.num_cls
             )
