@@ -18,18 +18,27 @@ class TrainE2E(cvde.job.Job):
         print("Running job: ", self.name)
 
         self.model = model = PVN3D_E2E(**job_cfg["PVN3D_E2E"])
-        if job_cfg["dataset"] == 'blender':
+        if job_cfg["dataset"] == "blender":
             train_config = job_cfg["TrainBlender"]
             val_config = job_cfg["ValBlender"]
             from datasets.blender import TrainBlender, ValBlender
+
             train_gen = TrainBlender
             val_gen = ValBlender
-        elif job_cfg["dataset"] == '6IMPOSE':
+        elif job_cfg["dataset"] == "6IMPOSE":
             train_config = job_cfg["Train6IMPOSE"]
             val_config = job_cfg["Val6IMPOSE"]
             from datasets.simpose import Train6IMPOSE, Val6IMPOSE
+
             train_gen = Train6IMPOSE
             val_gen = Val6IMPOSE
+        elif job_cfg["dataset"] == "sptfrecord":
+            train_config = job_cfg["TrainSPTFRecord"]
+            val_config = job_cfg["ValSPTFRecord"]
+            from datasets.sp_tfrecord import TrainSPTFRecord, ValSPTFRecord
+
+            train_gen = TrainSPTFRecord
+            val_gen = ValSPTFRecord
 
         train_set = train_gen(**train_config)
         val_set = val_gen(**val_config)
@@ -40,8 +49,8 @@ class TrainE2E(cvde.job.Job):
         self.loss_fn = loss_fn = PvnLoss(**job_cfg["PvnLoss"])
         optimizer = tf.keras.optimizers.Adam(**job_cfg["Adam"])
 
-        if 'weights' in job_cfg:
-            self.model.load_weights(job_cfg['weights'])
+        if "weights" in job_cfg:
+            self.model.load_weights(job_cfg["weights"])
 
         self.log_visualization(-1)
 

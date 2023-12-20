@@ -2,6 +2,7 @@ from cvde.tf import Dataset as _Dataset
 
 import os
 import tensorflow as tf
+import tensorflow_graphics.geometry.transformation as tfg_transformation
 
 os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
 import numpy as np
@@ -17,7 +18,7 @@ import itertools as it
 import simpose
 
 from .exr import EXR
-from .augment import add_background_depth, augment_depth, augment_rgb
+from .augment import add_background_depth, augment_depth, augment_rgb, DepthAugmenter
 
 """
 data in the 6IMPOSE datasets:
@@ -46,13 +47,14 @@ for each datapoint:
 """
 
 
-class _6IMPOSE(_Dataset):
+class _SPTFRecord(_Dataset):
     def __init__(
         self,
         *,
         if_augment,
         is_train,
         cls_type,
+        data_name,
         batch_size,
         use_cache,
         root,
@@ -83,24 +85,26 @@ class _6IMPOSE(_Dataset):
         self.add_bbox_noise = add_bbox_noise
         self.bbox_noise = bbox_noise
 
-        self.data_root = pathlib.Path(root).joinpath(cls_type)
+        self.data_root = pathlib.Path(root).joinpath(data_name)
 
-        all_files = self.data_root.joinpath("rgb").glob("*")
-        files = [x for x in all_files if "_R" not in str(x)]
-        numeric_file_ids = list([int(x.stem.split("_")[1]) for x in files])
-        numeric_file_ids.sort()
-        self.file_ids = [id for id in numeric_file_ids]
+        self.spds = ds = simpose.data.Dataset
+        keys = [
+            ds.RGB,
+            ds.DEPTH,
+            ds.MASK,
+            ds.CAM_LOCATION,
+            ds.CAM_ROTATION,
+            ds.CAM_MATRIX,
+            ds.OBJ_BBOX_VISIB,
+            ds.OBJ_CLASSES,
+            ds.OBJ_IDS,
+            ds.OBJ_POS,
+            ds.OBJ_ROT,
+            ds.OBJ_VISIB_FRACT,
+        ]
 
-        if cutoff is not None:
-            self.file_ids = self.file_ids[:cutoff]
-
-        total_n_imgs = len(self.file_ids)
-
-        split_ind = np.floor(len(self.file_ids) * train_split).astype(int)
-        if is_train:
-            self.file_ids = self.file_ids[:split_ind]
-        else:
-            self.file_ids = self.file_ids[split_ind:]
+        # if cutoff is not None:
+        #     self.file_ids = self.file_ids[:cutoff]
 
         mesh_path = self.data_root.joinpath(f"meshes/{self.cls_type}.obj")
         if not mesh_path.exists():
@@ -132,11 +136,44 @@ class _6IMPOSE(_Dataset):
         center = [np.loadtxt(mesh_kpts_path / "center.txt")]
 
         self.mesh_kpts = np.concatenate([kpts, center], axis=0)
+        self.mesh_kpts_tf = tf.constant(self.mesh_kpts, dtype=tf.float32)
+
+        self._tfds = simpose.data.TFRecordDataset.get(self.data_root, get_keys=keys)
+
+        # if self.if_augment:
+        #     h, w = 1080, 1920  # TODO read from metadata or so
+        #     augment = DepthAugmenter().get_augment_function(h, w)
+
+        #     self._tfds = self._tfds.map(
+        #         lambda data: augment(**data),
+        #         num_parallel_calls=tf.data.AUTOTUNE,
+        #         deterministic=False,
+        #     )
+        if self.add_bbox_noise:
+
+            def add_noise(*, obj_bbox_visib, **data):
+                obj_bbox_visib = obj_bbox_visib + tf.random.uniform(
+                    tf.shape(obj_bbox_visib), -self.bbox_noise, self.bbox_noise, dtype=tf.int32
+                )
+                return {**data, "obj_bbox_visib": obj_bbox_visib}
+
+            self._tfds = self._tfds.map(
+                lambda data: add_noise(**data),
+                num_parallel_calls=tf.data.AUTOTUNE,
+                deterministic=False,
+            )
+
+        self._tfds = self._tfds.flat_map(
+            lambda data: self.extract_crops_and_gt(
+                **data, cls_type=self.cls_type, mesh_kpts_tf=self.mesh_kpts_tf
+            ),
+        ).shuffle(1000)
+        self._tfds_iter = iter(self._tfds)
 
         print("Initialized 6IMPOSE Dataset.")
-        print(f"\t# of all images: {total_n_imgs}")
+        # print(f"\t# of all images: {total_n_imgs}")
         print(f"\tCls root: {self.data_root}")
-        print(f"\t# of images for this split: {len(self.file_ids)}")
+        # print(f"\t# of images for this split: {len(self.file_ids)}")
         print(f"\t# of augmented datapoints: {len(self)}")
         # print(f"\nIntrinsic matrix: {self.intrinsic_matrix}")
         print()
@@ -148,40 +185,11 @@ class _6IMPOSE(_Dataset):
                 d["mask"],
             )
 
-        if self.use_cache:
-            cache_name = "train" if self.is_train else "val"
-            cache_path = self.data_root / f"cache_{cache_name}"
-            try:
-                tfds = self.from_cache(cache_path)
-            except FileNotFoundError:
-                self.cache(cache_path)
-                tfds = self.from_cache(cache_path)
-
-            print("USING CACHE FROM ", cache_path)
-
-            return (
-                tfds.map(
-                    arrange_as_xy_tuple, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False
-                )
-                .batch(self.batch_size, drop_remainder=True, num_parallel_calls=tf.data.AUTOTUNE)
-                .prefetch(tf.data.AUTOTUNE)
-            )
-
-        signature = {}
-
-        data = self[0]
-        for k, v in data.items():
-            signature[k] = tf.TensorSpec(shape=v.shape, dtype=v.dtype, name=k)
-
         return (
-            tf.data.Dataset.from_generator(lambda: iter(self), output_signature=signature)
-            .map(arrange_as_xy_tuple, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False)
-            .batch(
-                self.batch_size,
-                drop_remainder=True,
-                num_parallel_calls=tf.data.AUTOTUNE,
-                deterministic=False,
+            self._tfds.map(
+                arrange_as_xy_tuple, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False
             )
+            .batch(self.batch_size, drop_remainder=True, num_parallel_calls=tf.data.AUTOTUNE)
             .prefetch(tf.data.AUTOTUNE)
         )
 
@@ -192,7 +200,6 @@ class _6IMPOSE(_Dataset):
 
         rgb = example["rgb"]
         depth = example["depth"]
-        depth += np.random.normal(loc=0.0, size=depth.shape, scale=0.2)
 
         intrinsics = example["intrinsics"].astype(np.float32)
         bboxes = example["roi"]
@@ -332,118 +339,175 @@ class _6IMPOSE(_Dataset):
             col.image(offset_view, caption=name)
 
     def __len__(self):
+        # HACK
+        return 30000 * self.n_aug_per_image * self.n_objects_per_image
         return len(self.file_ids) * self.n_aug_per_image * self.n_objects_per_image
-    
+
     def __getitem__(self, idx):
-        # this cycles n_aug_per_image times through the dataset
-        i = self.file_ids[idx % len(self.file_ids)]  # 0,1,2,3... i, 0, 1,2,..i
-        object_index = (
-            idx // len(self.file_ids) % self.n_objects_per_image
-        )  # 0,0,0,0,1,1,1,1,2,2,2,2
-
-        rgb = self.get_rgb(i)
-        depth = self.get_depth(i)
-        mask_visib = self.get_mask(i)
-
-        # always add depth background
-        # HACK DISABLED AUGMENT AND BACKGROUND!
-        depth = add_background_depth(depth[tf.newaxis, :, :])[0].numpy()  # add and remove batch
-        # # 6IMPOSE data augmentation
-        if self.if_augment:
-            depth = augment_depth(depth[tf.newaxis])[0].numpy()
-            rgb = augment_rgb(rgb.astype(np.float32) / 255.0) * 255
-
-        with open(os.path.join(self.data_root, "gt", f"gt_{i:05}.json")) as f:
-            shot = json.load(f)
-
-        intrinsics = np.array(shot["cam_matrix"])
-
-        cam_quat = shot["cam_rotation"]
-        cam_rot = R.from_quat(cam_quat)
-        cam_pos = np.array(shot["cam_location"])
-        cam_Rt = np.eye(4)
-        cam_Rt[:3, :3] = cam_rot.as_matrix().T
-        cam_Rt[:3, 3] = -cam_rot.as_matrix() @ cam_pos
-
-        all_objs = shot["objs"]
-        cls_objs = [obj for obj in all_objs if obj["class"] == self.cls_type]
-        # filter out objects that are too close to the image border
-        # too close means one of the bbox corners is one the edge
-
-        h, w = rgb.shape[:2]
-        objs = [
-            obj
-            for obj in cls_objs
-            if obj["bbox_visib"][0] > 0
-            and obj["bbox_visib"][1] > 0
-            and obj["bbox_visib"][2] < w - 1
-            and obj["bbox_visib"][3] < h - 1
-        ]
-
-        objs = [x for x in objs if x["visib_fract"] > 0.3]
-
-        if len(objs) == 0:
-            # crude fix. If all objects clip the image, then so be it
-            # probably camera is too close in these cases
-            # objs = cls_objs
-            return self.__getitem__(idx + 1)  # skips the current image
-
-        px_count = lambda x: x["px_count_valid"]
-        objs = sorted(objs, key=px_count, reverse=True)
-
-        obj = objs[object_index % len(objs)]
-        instance_id = obj["object id"]
-        pos = np.array(obj["pos"])
-        rot = R.from_quat(obj["rotation"])
-        RT = np.eye(4)
-        RT[:3, :3] = cam_rot.as_matrix().T @ rot.as_matrix()
-        RT[:3, 3] = cam_rot.as_matrix().T @ (pos - cam_pos)
-
-        bbox = obj["bbox_visib"]
-        bbox = np.array((bbox[1], bbox[0], bbox[3], bbox[2]))  # change order to y1,x1,y2,x2
-        mask = np.where(mask_visib == instance_id, 1, 0)
-
-        if self.add_bbox_noise:
-            bbox += np.random.randint(-self.bbox_noise, self.bbox_noise, size=bbox.shape)
-
+        # WE IGNORE INDICES AND JUST ITERATE THROUGH THE DATASET
+        data = next(self._tfds_iter)
         return {
-            "rgb": rgb.astype(np.uint8),
-            "depth": depth.astype(np.float32),
-            "intrinsics": intrinsics.astype(np.float32),
-            "roi": bbox.astype(np.int32),
-            "RT": RT.astype(np.float32),
-            "mask": mask.astype(np.uint8),
-            "mesh_kpts": self.mesh_kpts.astype(np.float32),
+            "rgb": data["rgb"].numpy().astype(np.uint8),
+            "depth": data["depth"].numpy().astype(np.float32),
+            "intrinsics": data["intrinsics"].numpy().astype(np.float32),
+            "roi": data["roi"].numpy().astype(np.int32),
+            "RT": data["RT"].numpy().astype(np.float32),
+            "mask": data["mask"].numpy().astype(np.uint8),
+            "mesh_kpts": self.mesh_kpts,
         }
 
-    def get_rgb(self, index) -> np.ndarray:
-        rgb_path = os.path.join(self.data_root, "rgb", f"rgb_{index:04}.png")
-        with Image.open(rgb_path) as rgb:
-            rgb = np.array(rgb).astype(np.uint8)
-        return rgb
+    @staticmethod
+    @tf.function
+    def matrix_to_quat(quat):
+        x, y, z, w = quat[0], quat[1], quat[2], quat[3]
+        tx = 2.0 * x
+        ty = 2.0 * y
+        tz = 2.0 * z
+        twx = tx * w
+        twy = ty * w
+        twz = tz * w
+        txx = tx * x
+        txy = ty * x
+        txz = tz * x
+        tyy = ty * y
+        tyz = tz * y
+        tzz = tz * z
+        matrix = tf.stack(
+            (
+                1.0 - (tyy + tzz),
+                txy - twz,
+                txz + twy,
+                txy + twz,
+                1.0 - (txx + tzz),
+                tyz - twx,
+                txz - twy,
+                tyz + twx,
+                1.0 - (txx + tyy),
+            ),
+            axis=-1,
+        )  # pyformat: disable
+        output_shape = tf.concat((tf.shape(input=quat)[:-1], (3, 3)), axis=-1)
+        return tf.reshape(matrix, shape=output_shape)
 
-    def get_mask(self, index) -> np.ndarray:
-        # with pathlib.Path(self.data_root).joinpath(f"mask/mask_{index:04}.exr").open("rb") as F:
-        #    reader = minexr.load(F)
-        # mask = reader.select(["visib.R"]).astype(np.uint8)
-        mask = EXR(self.data_root.joinpath(f"mask/mask_{index:04}.exr")).read("visib.R")
-        mask = mask.astype(np.uint8)[..., np.newaxis]
-        return mask  # [h, w, 1]
+    @staticmethod
+    @tf.function
+    def extract_crops_and_gt(
+        *,
+        rgb,
+        depth,
+        mask,
+        cam_location,
+        cam_rotation,
+        cam_matrix,
+        obj_bbox_visib,
+        obj_classes,
+        obj_ids,
+        obj_pos,
+        obj_rot,
+        obj_visib_fract,
+        cls_type,
+        mesh_kpts_tf,
+    ):
+        depth = depth[..., tf.newaxis]
+        mask = mask[..., tf.newaxis]
 
-    def get_depth(self, index) -> np.ndarray:
-        depth_path = os.path.join(self.data_root, "depth", f"depth_{index:04}.exr")
-        depth = cv2.imread(depth_path, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
-        depth = depth[:, :, :1]
-        depth_mask = depth < 5  # in meters, we filter out the background( > 5m)
-        depth = depth * depth_mask
-        return depth  # [h, w, 1]
+        cam_rot_matrix = _SPTFRecord.matrix_to_quat(cam_rotation)
+
+        cam_location = cam_location[..., tf.newaxis]
+        cam_rot_matrix = tf.transpose(cam_rot_matrix)
+
+        # 1) only use objects of correct class
+        is_correct_cls = obj_classes == cls_type
+
+        # 2) dont use objects at borders
+        h, w = tf.shape(rgb)[0], tf.shape(rgb)[1]
+        is_not_at_left_border = obj_bbox_visib[:, 0] > 0
+        is_not_at_right_border = obj_bbox_visib[:, 2] < w
+        is_not_at_top_border = obj_bbox_visib[:, 1] > 0
+        is_not_at_bottom_border = obj_bbox_visib[:, 3] < h
+        is_not_at_border = tf.logical_or(
+            tf.logical_or(is_not_at_left_border, is_not_at_right_border),
+            tf.logical_or(is_not_at_top_border, is_not_at_bottom_border),
+        )
+
+        # 3) only use objects that are visible (30% of pixels)
+        is_visible = obj_visib_fract > 0.3
+
+        is_valid = tf.logical_and(is_correct_cls, tf.logical_and(is_visible, is_not_at_border))
+
+        @tf.function
+        def assemble(
+            chosen_index,
+            rgb,
+            depth,
+            cam_matrix,
+            obj_bbox_visib,
+            obj_pos,
+            obj_rot,
+            cam_location,
+            cam_rot_matrix,
+        ):
+            return {
+                "rgb": rgb,
+                "depth": depth,
+                "intrinsics": cam_matrix,
+                "roi": _SPTFRecord.get_bbox(obj_bbox_visib, chosen_index),
+                "RT": _SPTFRecord.get_RT(
+                    obj_pos, obj_rot, cam_location, cam_rot_matrix, chosen_index
+                ),
+                "mask": _SPTFRecord.get_mask(mask, obj_ids, chosen_index),
+                "mesh_kpts": mesh_kpts_tf,
+            }
+
+        ds = tf.data.Dataset.from_tensor_slices(tf.where(is_valid)).map(
+            lambda chosen_index: assemble(
+                chosen_index[0],
+                rgb,
+                depth,
+                cam_matrix,
+                obj_bbox_visib,
+                obj_pos,
+                obj_rot,
+                cam_location,
+                cam_rot_matrix,
+            )
+        )
+        return ds
+
+    @staticmethod
+    @tf.function
+    def get_RT(obj_pos, obj_rot, cam_pos, cam_rot, chosen):
+        pos = obj_pos[chosen][..., tf.newaxis]
+        # rot = R.from_quat(data[self.spds.OBJ_ROT][chosen])
+        quat = obj_rot[chosen]
+        rot = _SPTFRecord.matrix_to_quat(quat)
+
+        rot_matrix = cam_rot @ rot  # (3,3)
+        translation = cam_rot @ (pos - cam_pos)  # (3,1)
+        RT = tf.concat([rot_matrix, translation], axis=-1)  # (3,4)
+        RT = tf.concat((RT, tf.constant([[0, 0, 0, 1]], dtype=tf.float32)), axis=0)  # (4,4)
+        return RT
+
+    @staticmethod
+    @tf.function
+    def get_bbox(bboxes, chosen):
+        bbox = bboxes[chosen]
+        # change order to y1,x1,y2,x2
+        bbox = tf.stack([bbox[..., 1], bbox[..., 0], bbox[..., 3], bbox[..., 2]])
+        return bbox
+
+    @staticmethod
+    @tf.function
+    def get_mask(mask, instance_ids, chosen):
+        instance_id = instance_ids[chosen]
+        return tf.where(mask == tf.cast(instance_id, tf.uint8), 1, 0)
 
 
-class Train6IMPOSE(_6IMPOSE):
+class TrainSPTFRecord(_SPTFRecord):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, if_augment=True, is_train=True, **kwargs)
 
 
-class Val6IMPOSE(_6IMPOSE):
+class ValSPTFRecord(_SPTFRecord):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, if_augment=False, is_train=False, **kwargs)
