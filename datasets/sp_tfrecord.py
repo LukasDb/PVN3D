@@ -2,7 +2,6 @@ from cvde.tf import Dataset as _Dataset
 
 import os
 import tensorflow as tf
-import tensorflow_graphics.geometry.transformation as tfg_transformation
 
 os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
 import numpy as np
