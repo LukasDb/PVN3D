@@ -137,7 +137,10 @@ class _SPTFRecord(_Dataset):
         self.mesh_kpts = np.concatenate([kpts, center], axis=0)
         self.mesh_kpts_tf = tf.constant(self.mesh_kpts, dtype=tf.float32)
 
-        self._tfds = simpose.data.TFRecordDataset.get(self.data_root, get_keys=keys)
+        # num parallel files: restrict open files
+        self._tfds = simpose.data.TFRecordDataset.get(
+            self.data_root, get_keys=keys, num_parallel_files=2
+        )
 
         # if self.if_augment:
         #     h, w = 1080, 1920  # TODO read from metadata or so
