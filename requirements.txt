@@ -1,8 +1,6 @@
 tensorflow #==2.9.3
 focal_loss
-albumentations
 tensorflow_addons #==0.19
 scipy
 segmentation_models
-millify
 Open3D

@@ -1,5 +1,5 @@
+from matplotlib.pylab import f
 from tqdm import tqdm
-from millify import millify
 import tensorflow as tf
 import numpy as np
 import cv2
@@ -7,6 +7,7 @@ import cv2
 import cvde
 from models.pvn3d_e2e import PVN3D_E2E
 from losses.pvn_loss import PvnLoss
+from datasets.sp_tfrecord import TrainSPTFRecord, ValSPTFRecord
 
 
 class TrainE2E(cvde.job.Job):
@@ -18,31 +19,13 @@ class TrainE2E(cvde.job.Job):
         print("Running job: ", self.name)
 
         self.model = model = PVN3D_E2E(**job_cfg["PVN3D_E2E"])
-        if job_cfg["dataset"] == "blender":
-            train_config = job_cfg["TrainBlender"]
-            val_config = job_cfg["ValBlender"]
-            from datasets.blender import TrainBlender, ValBlender
 
-            train_gen = TrainBlender
-            val_gen = ValBlender
-        elif job_cfg["dataset"] == "6IMPOSE":
-            train_config = job_cfg["Train6IMPOSE"]
-            val_config = job_cfg["Val6IMPOSE"]
-            from datasets.simpose import Train6IMPOSE, Val6IMPOSE
+        train_config = job_cfg["TrainSPTFRecord"]
+        val_config = job_cfg["ValSPTFRecord"]
 
-            train_gen = Train6IMPOSE
-            val_gen = Val6IMPOSE
-        elif job_cfg["dataset"] == "sptfrecord":
-            train_config = job_cfg["TrainSPTFRecord"]
-            val_config = job_cfg["ValSPTFRecord"]
-            from datasets.sp_tfrecord import TrainSPTFRecord, ValSPTFRecord
-
-            train_gen = TrainSPTFRecord
-            val_gen = ValSPTFRecord
-
-        train_set = train_gen(**train_config)
-        val_set = val_gen(**val_config)
-        self.demo_set = val_gen(**val_config)
+        train_set = TrainSPTFRecord(**train_config)
+        val_set = ValSPTFRecord(**val_config)
+        self.demo_set = ValSPTFRecord(**val_config)
         self.demo_set_tf = self.demo_set.to_tf_dataset().take(self.num_validate)
         self.mesh_vertices = val_set.mesh_vertices
 
@@ -57,17 +40,12 @@ class TrainE2E(cvde.job.Job):
         num_epochs = job_cfg["epochs"]
         train_set_tf = train_set.to_tf_dataset()
         val_set_tf = val_set.to_tf_dataset()
+        len_dataset = None
         for epoch in range(num_epochs):
-            bar = tqdm(
-                total=len(train_set) // train_set.batch_size,
-                desc=f"Train ({epoch}/{num_epochs-1})",
-            )
+            bar = tqdm(desc=f"Train ({epoch}/{num_epochs-1})", total=len_dataset)
 
             loss_vals = {}
             for x, y in train_set_tf:
-                if self.is_stopped():
-                    return
-
                 with tf.GradientTape() as tape:
                     pred = model(x, training=True)
                     loss_combined, loss_cp, loss_kp, loss_seg = loss_fn.call(y, pred)
@@ -79,19 +57,16 @@ class TrainE2E(cvde.job.Job):
                 loss_vals["loss_kp"] = loss_vals.get("loss_kp", []) + [loss_kp.numpy()]
                 loss_vals["loss_seg"] = loss_vals.get("loss_seg", []) + [loss_seg.numpy()]
 
-                bar.update(1)  # update by batchsize
-                bar.set_postfix(
-                    {
-                        "loss": millify(loss_combined.numpy(), precision=4),
-                    }
-                )
+                bar.update(train_set.batch_size)  # update by batchsize
+                bar.set_postfix_str(f"loss: {loss_combined.numpy():.4f}")
 
+            len_dataset = bar.n
             bar.close()
-            model.save(f"checkpoints/{self.tracker.name}/model_{epoch:02}", save_format="tf")
+            model.save(f"checkpoints/{self.logger.name}/model_{epoch:02}", save_format="tf")
 
             for k, v in loss_vals.items():
                 loss_vals[k] = tf.reduce_mean(v)
-                self.tracker.log(f"train_{k}", loss_vals[k], epoch)
+                self.logger.log(f"train_{k}", loss_vals[k], epoch)
 
             self.log_visualization(epoch)
 
@@ -108,7 +83,7 @@ class TrainE2E(cvde.job.Job):
 
             for k, v in loss_vals.items():
                 loss_vals[k] = tf.reduce_mean(v)
-                self.tracker.log(f"val_{k}", loss_vals[k], epoch)
+                self.logger.log(f"val_{k}", loss_vals[k], epoch)
 
     def log_visualization(self, epoch: int, logs=None):
         i = 0
@@ -232,15 +207,15 @@ class TrainE2E(cvde.job.Job):
                 b_xyz_projected,
             ):
                 vis_seg = self.draw_segmentation(rgb.copy(), sampled_inds, seg_pred, roi)
-                self.tracker.log(f"RGB ({i})", vis_seg, index=epoch)
+                self.logger.log(f"RGB ({i})", vis_seg, index=epoch)
 
-                # self.tracker.log(f"RGB (crop) ({i})", crop_rgb.astype(np.uint8), index=epoch)
+                # self.logger.log(f"RGB (crop) ({i})", crop_rgb.astype(np.uint8), index=epoch)
 
                 vis_mesh = self.draw_object_mesh(rgb.copy(), roi, mesh_vertices, mesh_vertices_gt)
-                self.tracker.log(f"RGB (mesh) ({i})", vis_mesh, index=epoch)
+                self.logger.log(f"RGB (mesh) ({i})", vis_mesh, index=epoch)
 
                 vis_kpts = self.draw_keypoint_correspondences(rgb.copy(), roi, kpts_gt, kpts_pred)
-                self.tracker.log(f"RGB (kpts) ({i})", vis_kpts, index=epoch)
+                self.logger.log(f"RGB (kpts) ({i})", vis_kpts, index=epoch)
 
                 vis_offsets = self.draw_keypoint_offsets(
                     rgb.copy(),
@@ -261,7 +236,7 @@ class TrainE2E(cvde.job.Job):
                 )
                 # assemble images side-by-side
                 vis_offsets = np.concatenate([vis_offsets, vis_offsets_gt], axis=1)
-                self.tracker.log(f"RGB (offsets) ({i})", vis_offsets, index=epoch)
+                self.logger.log(f"RGB (offsets) ({i})", vis_offsets, index=epoch)
 
                 vis_vectors = self.draw_keypoint_vectors(
                     rgb.copy(),
@@ -277,7 +252,7 @@ class TrainE2E(cvde.job.Job):
                 )
                 # assemble images side-by-side
                 vis_vectors = np.concatenate([vis_vectors, vis_vectors_gt], axis=1)
-                self.tracker.log(f"RGB (vectors) ({i})", vis_vectors, index=epoch)
+                self.logger.log(f"RGB (vectors) ({i})", vis_vectors, index=epoch)
 
                 i = i + 1
                 if i >= self.num_validate:

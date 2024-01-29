@@ -1,6 +1,5 @@
 epochs: 50
-num_validate: 5
-dataset: sptfrecord # 6IMPOSE
+num_validate: 10
 
 #weights: "checkpoints/lm_cam (no-seg loss)/model_01"
 #weights: "checkpoints/lm_cam (continued)/model_49"
@@ -13,23 +12,20 @@ Adam:
 
 shared: &shared
   root: "/home/lukas/data/6IMPOSE"
-  cls_type: nema17_holder2
-  data_name: test
-  train_split: 0.9
+  cls_type: cpsduck
   batch_size: 32
-  use_cache: False
-  n_aug_per_image: 1
-  n_objects_per_image: 5
   bbox_noise: 20 # shift by how maximum many pixels
 
 TrainSPTFRecord:
   <<: *shared
   #cutoff: 2 # truncate dataset for testing
+  data_name: cpsduck_2023_12_17
   add_bbox_noise: true
 
 ValSPTFRecord:
   <<: *shared
   #cutoff: 1000
+  data_name: cpsduck_2023_12_17_val
   add_bbox_noise: false
 
 

@@ -6,6 +6,7 @@ __pycache__
 log/
 .keras
 .mypy_cache
+.pytest_cache
 .cache/
 .local/
 checkpoints/**

@@ -5,19 +5,13 @@ import tensorflow as tf
 
 os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
 import numpy as np
-from PIL import Image
 import cv2
-import json
-from scipy.spatial.transform import Rotation as R
 import pathlib
 import streamlit as st
 import itertools as it
 import open3d as o3d
 import itertools as it
 import simpose
-
-from .exr import EXR
-from .augment import add_background_depth, augment_depth, augment_rgb, DepthAugmenter
 
 """
 data in the 6IMPOSE datasets:
@@ -55,14 +49,9 @@ class _SPTFRecord(_Dataset):
         cls_type,
         data_name,
         batch_size,
-        use_cache,
         root,
-        train_split,
-        n_aug_per_image: int,
-        n_objects_per_image: int,
         add_bbox_noise: bool,
         bbox_noise: int,
-        cutoff=None,
     ):
         super().__init__()
         self.colormap = [
@@ -77,10 +66,7 @@ class _SPTFRecord(_Dataset):
         self.cls_type = cls_type
         self.if_augment = if_augment
         self.batch_size = batch_size
-        self.use_cache = use_cache
         self.is_train = is_train
-        self.n_aug_per_image = n_aug_per_image
-        self.n_objects_per_image = n_objects_per_image
         self.add_bbox_noise = add_bbox_noise
         self.bbox_noise = bbox_noise
 
@@ -139,18 +125,11 @@ class _SPTFRecord(_Dataset):
 
         # num parallel files: restrict open files
         self._tfds = simpose.data.TFRecordDataset.get(
-            self.data_root, get_keys=keys, num_parallel_files=2
+            self.data_root, get_keys=keys, num_parallel_files=1
         )
 
-        # if self.if_augment:
-        #     h, w = 1080, 1920  # TODO read from metadata or so
-        #     augment = DepthAugmenter().get_augment_function(h, w)
+        # TODO augment data for sim2real transfer
 
-        #     self._tfds = self._tfds.map(
-        #         lambda data: augment(**data),
-        #         num_parallel_calls=tf.data.AUTOTUNE,
-        #         deterministic=False,
-        #     )
         if self.add_bbox_noise:
 
             def add_noise(*, obj_bbox_visib, **data):
@@ -165,11 +144,13 @@ class _SPTFRecord(_Dataset):
                 deterministic=False,
             )
 
-        self._tfds = self._tfds.flat_map(
+        self._tfds = self._tfds.interleave(
             lambda data: self.extract_crops_and_gt(
                 **data, cls_type=self.cls_type, mesh_kpts_tf=self.mesh_kpts_tf
             ),
-        ).shuffle(1000)
+            num_parallel_calls=tf.data.AUTOTUNE,
+            deterministic=False,
+        ).shuffle(100)
         self._tfds_iter = iter(self._tfds)
 
         print("Initialized 6IMPOSE Dataset.")
@@ -341,9 +322,7 @@ class _SPTFRecord(_Dataset):
             col.image(offset_view, caption=name)
 
     def __len__(self):
-        # HACK
-        return 30000 * self.n_aug_per_image * self.n_objects_per_image
-        return len(self.file_ids) * self.n_aug_per_image * self.n_objects_per_image
+        return 30000
 
     def __getitem__(self, idx):
         # WE IGNORE INDICES AND JUST ITERATE THROUGH THE DATASET
@@ -360,7 +339,7 @@ class _SPTFRecord(_Dataset):
 
     @staticmethod
     @tf.function
-    def matrix_to_quat(quat):
+    def quat_to_matrix(quat):
         x, y, z, w = quat[0], quat[1], quat[2], quat[3]
         tx = 2.0 * x
         ty = 2.0 * y
@@ -412,97 +391,66 @@ class _SPTFRecord(_Dataset):
     ):
         depth = depth[..., tf.newaxis]
         mask = mask[..., tf.newaxis]
-
-        cam_rot_matrix = _SPTFRecord.matrix_to_quat(cam_rotation)
-
+        cam_rot_matrix = _SPTFRecord.quat_to_matrix(cam_rotation)
         cam_location = cam_location[..., tf.newaxis]
         cam_rot_matrix = tf.transpose(cam_rot_matrix)
-
-        # 1) only use objects of correct class
-        is_correct_cls = obj_classes == cls_type
-
-        # 2) dont use objects at borders
         h, w = tf.shape(rgb)[0], tf.shape(rgb)[1]
-        is_not_at_left_border = obj_bbox_visib[:, 0] > 0
-        is_not_at_right_border = obj_bbox_visib[:, 2] < w
-        is_not_at_top_border = obj_bbox_visib[:, 1] > 0
-        is_not_at_bottom_border = obj_bbox_visib[:, 3] < h
-        is_not_at_border = tf.logical_or(
-            tf.logical_or(is_not_at_left_border, is_not_at_right_border),
-            tf.logical_or(is_not_at_top_border, is_not_at_bottom_border),
-        )
-
-        # 3) only use objects that are visible (30% of pixels)
-        is_visible = obj_visib_fract > 0.3
-
-        is_valid = tf.logical_and(is_correct_cls, tf.logical_and(is_visible, is_not_at_border))
 
         @tf.function
-        def assemble(
-            chosen_index,
-            rgb,
-            depth,
-            cam_matrix,
-            obj_bbox_visib,
-            obj_pos,
-            obj_rot,
-            cam_location,
-            cam_rot_matrix,
-        ):
+        def is_chosen_object(data):
+            return data["obj_classes"] == cls_type
+
+        @tf.function
+        def is_valid_box(data):
+            # here bbox is still in x1,y1,x2,y2 format
+            bbox = data["obj_bbox_visib"]
+            bbox_w = bbox[2] - bbox[0]
+            bbox_h = bbox[3] - bbox[1]
+            not_at_border = bbox[0] > 0 and bbox[1] > 0 and bbox[2] < w - 1 and bbox[3] < h - 1
+            return bbox_w > 39 and bbox_h > 39 and not_at_border and data["obj_visib_fract"] > 0.3
+
+        @tf.function
+        def assemble(data):
+            # convert bbox to y1,x1,y2,x2
+            bbox = data["obj_bbox_visib"]
+            bbox_permuted = tf.stack([bbox[1], bbox[0], bbox[3], bbox[2]])
+
+            # calculate RT
+            obj_rot_mat = _SPTFRecord.quat_to_matrix(data["obj_rot"])
+            rot_matrix = cam_rot_matrix @ obj_rot_mat  # (3,3)
+            translation = cam_rot_matrix @ (
+                data["obj_pos"][..., tf.newaxis] - cam_location
+            )  # (3,1)
+            RT = tf.concat([rot_matrix, translation], axis=-1)  # (3,4)
+            RT = tf.concat((RT, tf.constant([[0, 0, 0, 1]], dtype=tf.float32)), axis=0)  # (4,4)
+
+            obj_mask = tf.where(mask == tf.cast(data["obj_ids"], tf.uint8), 1, 0)
+
             return {
                 "rgb": rgb,
                 "depth": depth,
                 "intrinsics": cam_matrix,
-                "roi": _SPTFRecord.get_bbox(obj_bbox_visib, chosen_index),
-                "RT": _SPTFRecord.get_RT(
-                    obj_pos, obj_rot, cam_location, cam_rot_matrix, chosen_index
-                ),
-                "mask": _SPTFRecord.get_mask(mask, obj_ids, chosen_index),
+                "roi": bbox_permuted,
+                "RT": RT,
+                "mask": obj_mask,
                 "mesh_kpts": mesh_kpts_tf,
             }
 
-        ds = tf.data.Dataset.from_tensor_slices(tf.where(is_valid)).map(
-            lambda chosen_index: assemble(
-                chosen_index[0],
-                rgb,
-                depth,
-                cam_matrix,
-                obj_bbox_visib,
-                obj_pos,
-                obj_rot,
-                cam_location,
-                cam_rot_matrix,
+        return (
+            tf.data.Dataset.from_tensor_slices(
+                {
+                    "obj_classes": obj_classes,
+                    "obj_bbox_visib": obj_bbox_visib,
+                    "obj_visib_fract": obj_visib_fract,
+                    "obj_pos": obj_pos,
+                    "obj_rot": obj_rot,
+                    "obj_ids": obj_ids,
+                }
             )
+            .filter(is_chosen_object)
+            .filter(is_valid_box)
+            .map(assemble, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False)
         )
-        return ds
-
-    @staticmethod
-    @tf.function
-    def get_RT(obj_pos, obj_rot, cam_pos, cam_rot, chosen):
-        pos = obj_pos[chosen][..., tf.newaxis]
-        # rot = R.from_quat(data[self.spds.OBJ_ROT][chosen])
-        quat = obj_rot[chosen]
-        rot = _SPTFRecord.matrix_to_quat(quat)
-
-        rot_matrix = cam_rot @ rot  # (3,3)
-        translation = cam_rot @ (pos - cam_pos)  # (3,1)
-        RT = tf.concat([rot_matrix, translation], axis=-1)  # (3,4)
-        RT = tf.concat((RT, tf.constant([[0, 0, 0, 1]], dtype=tf.float32)), axis=0)  # (4,4)
-        return RT
-
-    @staticmethod
-    @tf.function
-    def get_bbox(bboxes, chosen):
-        bbox = bboxes[chosen]
-        # change order to y1,x1,y2,x2
-        bbox = tf.stack([bbox[..., 1], bbox[..., 0], bbox[..., 3], bbox[..., 2]])
-        return bbox
-
-    @staticmethod
-    @tf.function
-    def get_mask(mask, instance_ids, chosen):
-        instance_id = instance_ids[chosen]
-        return tf.where(mask == tf.cast(instance_id, tf.uint8), 1, 0)
 
 
 class TrainSPTFRecord(_SPTFRecord):

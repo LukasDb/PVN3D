@@ -1,17 +1,14 @@
 from tqdm import tqdm
-from millify import millify
 import tensorflow as tf
 import numpy as np
 import cv2
 from pathlib import Path
-from sklearn.neighbors import NearestNeighbors
 
 import cvde
 from models.pvn3d_e2e import PVN3D_E2E
 from losses.pvn_loss import PvnLoss
+from datasets.sp_tfrecord import TrainSPTFRecord, ValSPTFRecord
 
-from datasets.blender import ValBlender
-from datasets.simpose import Val6IMPOSE
 from datasets.linemod import LineMOD
 
 
@@ -30,25 +27,11 @@ class Evaluate(cvde.job.Job):
         eval_len = lambda x: len(x) // x.batch_size
 
         with tf.device("/cpu:0"):
-            if "ValBlender" in job_cfg["datasets"]:
-                try:
-                    blender = ValBlender(**blender_config)
-                    blender_tf = blender.to_tf_dataset()
-                    datasets["blender"] = (blender_tf, eval_len(blender))
-                    self.mesh_vertices = blender.mesh_vertices
-                except Exception as e:
-                    print("Blender dataset not found, skipping...")
-                    print(e)
-
-            if "Val6IMPOSE" in job_cfg["datasets"]:
-                try:
-                    simpose = Val6IMPOSE(**simpose_config)
-                    simpose_tf = simpose.to_tf_dataset()
-                    datasets["simpose"] = (simpose_tf, eval_len(simpose))
-                    self.mesh_vertices = simpose.mesh_vertices
-                except Exception as e:
-                    print("Simpose dataset not found, skipping...")
-                    print(e)
+            val_config = job_cfg["ValSPTFRecord"]
+            val_set = ValSPTFRecord(**val_config)
+            val_set_tf = val_set.to_tf_dataset()
+            datasets["simpose"] = (val_set_tf, eval_len(val_set))
+            self.mesh_vertices = val_set.mesh_vertices
 
             if "LineMOD" in job_cfg["datasets"]:
                 try:
@@ -81,7 +64,7 @@ class Evaluate(cvde.job.Job):
             if res == "abort":
                 return
             for k, v in loss_vals.items():
-                self.tracker.log(f"{name}_{k}", v, 0)
+                self.logger.log(f"{name}_{k}", v, 0)
 
     def get_visualization(self, name: str, model: PVN3D_E2E, dataset_tf):
         i = 0
@@ -149,7 +132,7 @@ class Evaluate(cvde.job.Job):
                     return
 
                 vis_mesh = self.draw_object_mesh(rgb.copy(), roi, mesh_vertices, mesh_vertices_gt)
-                self.tracker.log(name, vis_mesh, index=i)
+                self.logger.log(name, vis_mesh, index=i)
 
                 i = i + 1
                 bar.update(1)
